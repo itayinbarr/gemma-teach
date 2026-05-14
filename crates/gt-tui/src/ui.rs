@@ -105,11 +105,15 @@ fn handle_key(app: &mut App, k: KeyEvent) {
         },
         AppMode::StudentEditModal(form) => match k.code {
             KeyCode::Esc => app.mode = AppMode::Idle,
-            KeyCode::Enter if k.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Shift-Enter inserts a newline; plain Enter submits.
+            KeyCode::Enter if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                form.notes.push('\n');
+            }
+            KeyCode::Enter => {
                 let name = form.name.clone();
                 let notes = form.notes.trim().to_string();
                 if notes.is_empty() {
-                    app.log("Edit notes are empty — type Esc to cancel.");
+                    app.log("Edit notes are empty — Esc to cancel, type your notes then Enter.");
                     return;
                 }
                 app.start_student_edit(name, notes);
@@ -117,7 +121,6 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Backspace => {
                 form.notes.pop();
             }
-            KeyCode::Enter => form.notes.push('\n'),
             KeyCode::Char(c) => form.notes.push(c),
             _ => {}
         },
@@ -131,19 +134,31 @@ fn handle_key(app: &mut App, k: KeyEvent) {
                     FormField::Description => FormField::Name,
                 };
             }
-            KeyCode::Enter if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                let name = form.name.trim().to_string();
-                let description = form.description.trim().to_string();
-                if name.is_empty() || description.is_empty() {
-                    app.log("Both Name and Description are required.");
-                    return;
-                }
-                app.start_student_add(name, description);
+            // In Description, Shift-Enter inserts a newline so multiline notes still work.
+            KeyCode::Enter
+                if matches!(form.focus, FormField::Description)
+                    && k.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                form.description.push('\n');
             }
+            // Plain Enter on the Name field advances to Description.
+            // Plain Enter on Description submits the form.
             KeyCode::Enter => match form.focus {
-                FormField::Description => form.description.push('\n'),
                 FormField::Name => {
+                    if form.name.trim().is_empty() {
+                        app.log("Name is required.");
+                        return;
+                    }
                     form.focus = FormField::Description;
+                }
+                FormField::Description => {
+                    let name = form.name.trim().to_string();
+                    let description = form.description.trim().to_string();
+                    if name.is_empty() || description.is_empty() {
+                        app.log("Both Name and Description are required.");
+                        return;
+                    }
+                    app.start_student_add(name, description);
                 }
             },
             KeyCode::Backspace => match form.focus {
@@ -272,10 +287,15 @@ fn draw_edit_modal(f: &mut ratatui::Frame, area: Rect, form: &StudentEditForm) {
 
     let hint = Paragraph::new(Line::from(vec![
         Span::styled(
-            "Ctrl-Enter",
+            "Enter",
             Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" submit    "),
+        Span::styled(
+            "Shift-Enter",
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" newline    "),
         Span::styled("Esc", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
         Span::raw(" cancel"),
     ]));
@@ -478,8 +498,10 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, form: &StudentAddForm) {
     let hint = Paragraph::new(Line::from(vec![
         Span::styled("Tab", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
         Span::raw(" switch field    "),
-        Span::styled("Ctrl-Enter", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-        Span::raw(" submit    "),
+        Span::styled("Enter", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::raw(" next / submit    "),
+        Span::styled("Shift-Enter", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::raw(" newline    "),
         Span::styled("Esc", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
         Span::raw(" cancel"),
     ]));

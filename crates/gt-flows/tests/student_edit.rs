@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn student_edit_uses_edit_not_write_and_refreshes_tags() {
+async fn student_edit_rewrites_profile_and_refreshes_tags() {
     let dir = tempdir().unwrap();
     let root = dir.path().to_path_buf();
 
@@ -22,44 +22,32 @@ async fn student_edit_uses_edit_not_write_and_refreshes_tags() {
 
     let backend = Arc::new(MockBackend::new());
 
-    // -- update-student session: Read → Edit → Done
+    // -- rewrite-student session: one-shot Write of updated profile.
     backend.push(
         MockScript::new()
-            .tool("Read", serde_json::json!({"path":"student.md"}))
-            .done(StopReason::Eos),
-    );
-    backend.push(
-        MockScript::new()
-            .tool(
-                "Edit",
-                serde_json::json!({
-                    "path":"student.md",
-                    "old_text":"- swimming",
-                    "new_text":"- swimming\n- chess (newly picked up)",
-                }),
-            )
-            .done(StopReason::Eos),
-    );
-    backend.push(MockScript::new().text("Done.").done(StopReason::Eos));
-
-    // -- refresh-tags session: Read → Write → Done
-    backend.push(
-        MockScript::new()
-            .tool("Read", serde_json::json!({"path":"student.md"}))
-            .done(StopReason::Eos),
-    );
-    backend.push(
-        MockScript::new()
+            .text("Done.")
             .tool(
                 "Write",
                 serde_json::json!({
-                    "path":"tags.json",
-                    "content":"[\"painting\",\"swimming\",\"chess\"]",
+                    "path": "student.md",
+                    "content": "# Maya\n\n## Interests\n- painting\n- swimming\n- chess (newly picked up)\n",
                 }),
             )
             .done(StopReason::Eos),
     );
-    backend.push(MockScript::new().text("Done.").done(StopReason::Eos));
+    // -- refresh-tags session: one-shot Write of tags.json.
+    backend.push(
+        MockScript::new()
+            .text("Done.")
+            .tool(
+                "Write",
+                serde_json::json!({
+                    "path": "tags.json",
+                    "content": "[\"painting\",\"swimming\",\"chess\"]",
+                }),
+            )
+            .done(StopReason::Eos),
+    );
 
     let tools = ToolRegistry::new()
         .register(Arc::new(gt_tools::ReadTool))
@@ -88,10 +76,12 @@ async fn student_edit_uses_edit_not_write_and_refreshes_tags() {
 
     let got_md = tokio::fs::read_to_string(maya_dir.join("student.md")).await.unwrap();
     assert!(got_md.contains("- chess (newly picked up)"));
-    assert!(got_md.contains("- painting"), "previous lines preserved");
+    assert!(got_md.contains("- painting"));
 
     let got_tags: Vec<String> =
         serde_json::from_str(&tokio::fs::read_to_string(maya_dir.join("tags.json")).await.unwrap())
             .unwrap();
     assert!(got_tags.contains(&"chess".to_string()));
+    // Backup should have been cleaned up.
+    assert!(!maya_dir.join(".student.md.prior").exists());
 }

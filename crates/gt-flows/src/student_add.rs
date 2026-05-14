@@ -177,40 +177,49 @@ Write the file to `student.md` using the Write tool. After Write succeeds, reply
 
 const TAGS_JSON_FILENAME: &str = "tags.json";
 
-const EXTRACT_TAGS_SYSTEM: &str = r#"You are a careful teaching assistant working inside a fixed working directory.
+// Small local models tend to fail the multi-turn "Read → Write" dance: after
+// the Read tool result, the model often emits EOS immediately. To work with
+// Gemma's strength (single-turn generation) we pre-load `student.md` into the
+// task prompt deterministically so the model only needs one Write call.
+const EXTRACT_TAGS_SYSTEM: &str = r##"You are a careful teaching assistant working inside a fixed working directory.
 
-You can ONLY use these tools:
-  - Read  — reads an existing UTF-8 file inside the working directory.
+You can ONLY use this tool:
   - Write — creates a NEW file inside the working directory.
 
 How to use tools:
-  - Emit tool calls natively. Do NOT wrap them in code fences or XML tags.
-  - First Read `student.md` to see the student's interests.
-  - Then Write `tags.json` with a valid JSON array of lowercase kebab-case tag strings.
-  - After Write succeeds, reply exactly: Done.
+  - Use `tool_code` fences to call tools, e.g.:
+    ```tool_code
+    Write(path="tags.json", content="[\"anime\", \"marine-biology\"]")
+    ```
+  - One tool call is enough for this task. After Write succeeds, reply exactly: Done.
 
 Output format for `tags.json` (MANDATORY):
 A single JSON array, each element a string of one to three words separated by hyphens.
 Examples of valid tags: "anime", "k-pop", "marine-biology", "competitive-chess".
 Do NOT include explanations, code fences, or any other text in `tags.json`.
-"#;
+"##;
 
 struct ExtractTags;
 
 impl AgentStepFactory for ExtractTags {
     fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
         let dir = student_dir(ctx).expect("student_dir resolved");
+        // Pre-load the student profile so the model has the data in-context.
+        let profile = std::fs::read_to_string(dir.join(STUDENT_MD_FILENAME))
+            .unwrap_or_else(|_| "(student.md not found)".into());
         let task = format!(
-            r#"Read `{STUDENT_MD_FILENAME}` and extract a list of interest tags. Write them as a JSON array to `{TAGS_JSON_FILENAME}`.
+            r#"Below is a student's profile. Read it carefully, extract 4-10 interest tags as lowercase kebab-case strings (one to three words each, e.g. "marine-biology", "studio-ghibli"), and write them as a JSON array to `{TAGS_JSON_FILENAME}`.
 
-Aim for 4-10 tags. Use lowercase kebab-case (e.g., "marine-biology", "studio-ghibli"). Each tag should be one to three words.
+After Write succeeds, reply: Done.
 
-After Write succeeds, reply: Done."#
+--- student.md ---
+{profile}
+--- end of student.md ---"#
         );
         SessionBuilder::new("extract-tags", dir)
             .system_prompt(EXTRACT_TAGS_SYSTEM)
             .task_prompt(task)
-            .allowed_tools(["Read", "Write"])
+            .allowed_tools(["Write"])
             .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
     }
 

@@ -39,14 +39,25 @@ pub fn build_flow(
     // then run the tailor session against that dir. Tailor sessions run under the
     // parallel group "tailor" so the orchestrator's semaphore caps concurrency.
     for slug in &student_slugs {
+        // mk-per-student-dir is a tiny deterministic step — we still need the
+        // directory to exist before the agent session writes into it, but we
+        // no longer copy the master notes/homework here. Their content is
+        // pre-loaded directly from the lesson dir at session-build time.
         steps.push(StepNode::det(
-            format!("copy-context-for-{slug}"),
-            CopyContextForStudent { slug: slug.clone() },
+            format!("mk-dir-for-{slug}"),
+            MkPerStudentDir { slug: slug.clone() },
         ));
         steps.push(
             StepNode::agent(
-                format!("tailor-for-{slug}"),
-                TailorForStudent { slug: slug.clone() },
+                format!("tailor-notes-for-{slug}"),
+                TailorNotesForStudent { slug: slug.clone() },
+            )
+            .in_group("tailor"),
+        );
+        steps.push(
+            StepNode::agent(
+                format!("tailor-hw-for-{slug}"),
+                TailorHomeworkForStudent { slug: slug.clone() },
             )
             .in_group("tailor"),
         );
@@ -143,29 +154,32 @@ impl DeterministicStep for OcrSource {
 
 // ----- Step 3: write-class-notes -------------------------------------------
 
-const WRITE_NOTES_SYSTEM: &str = r#"You are a careful teaching assistant working inside a fixed working directory.
+// One-shot pattern: each session gets its inputs pre-loaded into the task
+// prompt and only needs to emit ONE Write tool call. This works with Gemma 3n's
+// single-turn strength instead of fighting it through multi-step Read+Write.
+const ONE_SHOT_WRITE_SYSTEM: &str = r##"You are a careful teaching assistant working inside a fixed working directory.
 
-You can ONLY use these tools:
-  - Read  — reads an existing file in the working directory.
-  - Write — creates a NEW file in the working directory.
+You can ONLY use this tool:
+  - Write — creates a NEW file inside the working directory.
 
 How to use tools:
-  - Emit tool calls natively. Do NOT wrap in code fences or XML tags.
-  - First Read `source.txt` to see the OCR'd chapter.
-  - Then Write `class-notes.md` with the required structure.
-  - After Write succeeds, reply: Done.
-"#;
+  - Use `tool_code` fences to call tools, e.g.:
+    ```tool_code
+    Write(path="class-notes.md", content="# Title\n...")
+    ```
+  - One Write call is enough for this task. After Write succeeds, reply exactly: Done.
+"##;
 
 struct WriteClassNotes;
 impl AgentStepFactory for WriteClassNotes {
     fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
         let dir = lesson_dir(ctx);
+        let source = std::fs::read_to_string(dir.join(SOURCE_TXT_FILENAME))
+            .unwrap_or_else(|_| "(source.txt not found)".into());
         let task = format!(
-            r#"Read `source.txt`. It is the OCR'd content of a textbook chapter.
+            r#"Below is the OCR'd content of a textbook chapter. Write `{CLASS_NOTES_FILENAME}` with EXACTLY this structure:
 
-Produce `class-notes.md` with EXACTLY this structure:
-
-# <title — infer from source>
+# <title — infer from the source>
 
 ## Learning objectives
 - 3-5 bullets, each starting with a verb (identify, explain, apply, contrast, predict).
@@ -186,13 +200,17 @@ Produce `class-notes.md` with EXACTLY this structure:
 ## Common misconceptions
 - 2-4 bullets a teacher should pre-empt.
 
-Stay strictly faithful to `source.txt`. Do not introduce material that is not in the source.
-After Write succeeds, reply: Done."#
+Stay strictly faithful to the source. Do not introduce material that is not in the source.
+After Write succeeds, reply: Done.
+
+--- source.txt ---
+{source}
+--- end of source.txt ---"#
         );
         SessionBuilder::new("write-class-notes", dir)
-            .system_prompt(WRITE_NOTES_SYSTEM)
+            .system_prompt(ONE_SHOT_WRITE_SYSTEM)
             .task_prompt(task)
-            .allowed_tools(["Read", "Write"])
+            .allowed_tools(["Write"])
             .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
     }
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
@@ -202,13 +220,14 @@ After Write succeeds, reply: Done."#
 
 // ----- Step 4: write-homework ----------------------------------------------
 
-const WRITE_HW_SYSTEM: &str = WRITE_NOTES_SYSTEM;
-
 struct WriteHomework;
 impl AgentStepFactory for WriteHomework {
     fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
         let dir = lesson_dir(ctx);
-        let task = r#"Read `class-notes.md`. Produce `homework.md` with EXACTLY this structure:
+        let class_notes = std::fs::read_to_string(dir.join(CLASS_NOTES_FILENAME))
+            .unwrap_or_else(|_| "(class-notes.md not found)".into());
+        let task = format!(
+            r#"Below is today's class-notes.md. Write `{HOMEWORK_FILENAME}` with EXACTLY this structure:
 
 # Homework — <same title as class-notes.md>
 
@@ -225,12 +244,17 @@ One short open-ended question.
 ## Suggested time
 e.g., "30 minutes"
 
-Every problem MUST map to a concept from `## Key concepts` of `class-notes.md`. Problems should grow in difficulty.
-After Write succeeds, reply: Done."#;
+Every problem MUST map to a concept from `## Key concepts` of class-notes.md. Problems should grow in difficulty.
+After Write succeeds, reply: Done.
+
+--- class-notes.md ---
+{class_notes}
+--- end of class-notes.md ---"#
+        );
         SessionBuilder::new("write-homework", dir)
-            .system_prompt(WRITE_HW_SYSTEM)
-            .task_prompt(task.to_string())
-            .allowed_tools(["Read", "Write"])
+            .system_prompt(ONE_SHOT_WRITE_SYSTEM)
+            .task_prompt(task)
+            .allowed_tools(["Write"])
             .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
     }
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
@@ -238,99 +262,133 @@ After Write succeeds, reply: Done."#;
     }
 }
 
-// ----- Step 5: copy-context-for-<student> ----------------------------------
+// ----- Step 5: mk-dir-for-<student> -----------------------------------------
 
-struct CopyContextForStudent {
+struct MkPerStudentDir {
     slug: String,
 }
 #[async_trait]
-impl DeterministicStep for CopyContextForStudent {
+impl DeterministicStep for MkPerStudentDir {
     async fn run(&self, ctx: &FlowCtx) -> Result<StepOutcome, FlowError> {
-        let lesson = lesson_dir(ctx);
-        let dest = lesson.join("per-student").join(&self.slug);
+        let dest = lesson_dir(ctx).join("per-student").join(&self.slug);
         tokio::fs::create_dir_all(&dest).await.map_err(|e| FlowError::Step {
-            step: format!("copy-context-for-{}", self.slug),
+            step: format!("mk-dir-for-{}", self.slug),
             msg: e.to_string(),
         })?;
-        // class-notes.md + homework.md
-        for f in [CLASS_NOTES_FILENAME, HOMEWORK_FILENAME] {
-            let from = lesson.join(f);
-            let to = dest.join(f);
-            tokio::fs::copy(&from, &to).await.map_err(|e| FlowError::Step {
-                step: format!("copy-context-for-{}", self.slug),
-                msg: format!("copy {} -> {}: {e}", from.display(), to.display()),
-            })?;
-        }
-        // student.md + tags.json from the student's profile
-        for f in ["student.md", "tags.json"] {
-            let from = ctx.root.join("students").join(&self.slug).join(f);
-            let to = dest.join(f);
-            tokio::fs::copy(&from, &to).await.map_err(|e| FlowError::Step {
-                step: format!("copy-context-for-{}", self.slug),
-                msg: format!("copy {} -> {}: {e}", from.display(), to.display()),
-            })?;
-        }
         Ok(StepOutcome::default())
     }
 }
 
 // ----- Step 6: tailor-for-<student> (parallel group "tailor") ---------------
 
-const TAILOR_SYSTEM: &str = r#"You are a careful teaching assistant tailoring a lesson for one student.
+// Tailor session: we split into TWO one-shot sessions per student so each
+// session emits exactly one Write call. The orchestrator interleaves them in
+// the original parallel group. (See `build_flow` for the wiring.)
+const TAILOR_SYSTEM: &str = r##"You are a careful teaching assistant tailoring a lesson for one student.
 
-You can ONLY use these tools:
-  - Read  — reads an existing file in the working directory.
-  - Write — creates a NEW file in the working directory.
+You can ONLY use this tool:
+  - Write — creates a NEW file inside the working directory.
 
 How to use tools:
-  - Emit tool calls natively. Do NOT wrap in code fences or XML tags.
-  - Read `student.md`, `tags.json`, `class-notes.md`, and `homework.md` in that order.
-  - Then Write `notes.md` first, then Write `homework.md`.
-  - After both Writes succeed, reply: Done.
+  - Use `tool_code` fences to call tools, e.g.:
+    ```tool_code
+    Write(path="notes.md", content="# Title\n...")
+    ```
+  - One Write call is enough for this task. After Write succeeds, reply exactly: Done.
 
 NON-NEGOTIABLE rules:
-  - Cover the SAME concepts and the SAME learning objectives as `class-notes.md`.
-  - Keep the SAME problem count as `homework.md` (no more, no less).
-  - Re-skin examples, analogies, and problem framings using the student's interests.
-  - Keep the same section headings as the originals.
-"#;
+  - Cover the SAME concepts and the SAME learning objectives as the master file.
+  - Re-skin examples, analogies, and framings using the student's interests.
+  - Keep the same section headings as the original.
+"##;
 
-struct TailorForStudent {
+struct TailorNotesForStudent {
     slug: String,
 }
-impl AgentStepFactory for TailorForStudent {
+impl AgentStepFactory for TailorNotesForStudent {
     fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
         let dir = lesson_dir(ctx).join("per-student").join(&self.slug);
-        let task = r#"Tailor today's lesson for this student.
+        let student_root = ctx.root.join("students").join(&self.slug);
+        let lesson = lesson_dir(ctx);
+        let student_md = std::fs::read_to_string(student_root.join("student.md"))
+            .unwrap_or_else(|_| "(student.md not found)".into());
+        let tags_json = std::fs::read_to_string(student_root.join("tags.json"))
+            .unwrap_or_else(|_| "(tags.json not found)".into());
+        let class_notes = std::fs::read_to_string(lesson.join(CLASS_NOTES_FILENAME))
+            .unwrap_or_else(|_| "(class-notes.md not found)".into());
+        let task = format!(
+            r#"Rewrite the class-notes for this student. Write `{STUDENT_NOTES_FILENAME}` covering the SAME concepts and objectives, but re-skinned through the student's interests.
 
-Read these files in order:
-  1. student.md
-  2. tags.json
-  3. class-notes.md
-  4. homework.md
+After Write succeeds, reply: Done.
 
-Then produce TWO files in this directory:
-  - notes.md     — same structure as class-notes.md, re-skinned for this student.
-  - homework.md  — same problem count as homework.md, re-skinned for this student.
+--- student.md ---
+{student_md}
+--- end of student.md ---
 
-After both Writes succeed, reply: Done."#;
-        SessionBuilder::new(format!("tailor-for-{}", self.slug), dir)
+--- tags.json ---
+{tags_json}
+--- end of tags.json ---
+
+--- class-notes.md (the master to re-skin) ---
+{class_notes}
+--- end of class-notes.md ---"#
+        );
+        SessionBuilder::new(format!("tailor-notes-for-{}", self.slug), dir)
             .system_prompt(TAILOR_SYSTEM)
-            .task_prompt(task.to_string())
-            .allowed_tools(["Read", "Write"])
+            .task_prompt(task)
+            .allowed_tools(["Write"])
             .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
     }
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
-        vec![
-            (
-                format!("tailored_notes_{}", self.slug),
-                PathBuf::from(STUDENT_NOTES_FILENAME),
-            ),
-            (
-                format!("tailored_hw_{}", self.slug),
-                PathBuf::from(STUDENT_HW_FILENAME),
-            ),
-        ]
+        vec![(
+            format!("tailored_notes_{}", self.slug),
+            PathBuf::from(STUDENT_NOTES_FILENAME),
+        )]
+    }
+}
+
+struct TailorHomeworkForStudent {
+    slug: String,
+}
+impl AgentStepFactory for TailorHomeworkForStudent {
+    fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
+        let dir = lesson_dir(ctx).join("per-student").join(&self.slug);
+        let student_root = ctx.root.join("students").join(&self.slug);
+        let lesson = lesson_dir(ctx);
+        let student_md = std::fs::read_to_string(student_root.join("student.md"))
+            .unwrap_or_else(|_| "(student.md not found)".into());
+        let tags_json = std::fs::read_to_string(student_root.join("tags.json"))
+            .unwrap_or_else(|_| "(tags.json not found)".into());
+        let master_hw = std::fs::read_to_string(lesson.join(HOMEWORK_FILENAME))
+            .unwrap_or_else(|_| "(homework.md not found)".into());
+        let task = format!(
+            r#"Rewrite the homework for this student. Write `{STUDENT_HW_FILENAME}` with the SAME problem count and structure, re-skinned through the student's interests. Each problem must still map to the same concept.
+
+After Write succeeds, reply: Done.
+
+--- student.md ---
+{student_md}
+--- end of student.md ---
+
+--- tags.json ---
+{tags_json}
+--- end of tags.json ---
+
+--- homework.md (the master to re-skin) ---
+{master_hw}
+--- end of homework.md ---"#
+        );
+        SessionBuilder::new(format!("tailor-hw-for-{}", self.slug), dir)
+            .system_prompt(TAILOR_SYSTEM)
+            .task_prompt(task)
+            .allowed_tools(["Write"])
+            .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
+    }
+    fn output_keys(&self) -> Vec<(String, PathBuf)> {
+        vec![(
+            format!("tailored_hw_{}", self.slug),
+            PathBuf::from(STUDENT_HW_FILENAME),
+        )]
     }
 }
 

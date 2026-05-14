@@ -31,14 +31,10 @@ async fn student_add_end_to_end_against_mock_backend() {
     );
     backend.push(MockScript::new().text("Done.").done(StopReason::Eos));
 
-    // -- session: extract-tags
+    // -- session: extract-tags (one-shot: student.md is pre-loaded into the prompt)
     backend.push(
         MockScript::new()
-            .tool("Read", serde_json::json!({"path":"student.md"}))
-            .done(StopReason::Eos),
-    );
-    backend.push(
-        MockScript::new()
+            .text("Done.")
             .tool(
                 "Write",
                 serde_json::json!({
@@ -48,7 +44,6 @@ async fn student_add_end_to_end_against_mock_backend() {
             )
             .done(StopReason::Eos),
     );
-    backend.push(MockScript::new().text("Done.").done(StopReason::Eos));
 
     let tools = ToolRegistry::new()
         .register(Arc::new(gt_tools::ReadTool))
@@ -135,21 +130,16 @@ async fn student_add_tag_intersections_finds_overlaps_with_existing_students() {
             .done(StopReason::Eos),
     );
     backend.push(MockScript::new().text("Done.").done(StopReason::Eos));
-    // extract-tags
+    // extract-tags (one-shot)
     backend.push(
         MockScript::new()
-            .tool("Read", serde_json::json!({"path":"student.md"}))
-            .done(StopReason::Eos),
-    );
-    backend.push(
-        MockScript::new()
+            .text("Done.")
             .tool(
                 "Write",
                 serde_json::json!({"path":"tags.json","content":"[\"studio-ghibli\",\"drawing\"]"}),
             )
             .done(StopReason::Eos),
     );
-    backend.push(MockScript::new().text("Done.").done(StopReason::Eos));
 
     let tools = ToolRegistry::new()
         .register(Arc::new(gt_tools::ReadTool))

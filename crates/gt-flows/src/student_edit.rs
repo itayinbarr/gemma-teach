@@ -1,10 +1,16 @@
-//! `/student-edit <name>` — update a student profile and refresh their tags.
+//! `/student-edit <name>` — apply teacher's update notes to a student profile
+//! and refresh their tags.
 //!
 //! Steps:
-//!   1. update-student   (agent: Read + Edit only — NOT Write; the file exists)
-//!   2. delete-old-tags  (deterministic: remove tags.json so refresh-tags can Write)
-//!   3. refresh-tags     (agent: Read + Write)
-//!   4. validate-tags    (deterministic)
+//!   1. delete-old-student-md  (det)
+//!   2. rewrite-student        (agent: one-shot Write replacement)
+//!   3. delete-old-tags        (det)
+//!   4. refresh-tags           (agent: one-shot Write tags.json)
+//!   5. validate-tags          (det)
+//!
+//! Single-step pattern throughout: each agent session receives the full prior
+//! content in its task prompt and emits exactly one Write call. Multi-step
+//! "Read then Edit/Write" dances are not reliable on Gemma 3n E2B.
 
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -22,7 +28,8 @@ pub fn build_flow() -> Flow {
     Flow::new(
         "/student-edit".to_string(),
         vec![
-            StepNode::agent("update-student", UpdateStudent),
+            StepNode::det("delete-old-student-md", DeleteOldStudentMd),
+            StepNode::agent("rewrite-student", RewriteStudent),
             StepNode::det("delete-old-tags", DeleteOldTags),
             StepNode::agent("refresh-tags", RefreshTags),
             StepNode::det("validate-tags", ValidateTags),
@@ -50,49 +57,92 @@ fn student_dir(ctx: &FlowCtx) -> Result<PathBuf, FlowError> {
     Ok(ctx.root.join("students").join(slugify(name)))
 }
 
-// ----- Step 1: update-student -----------------------------------------------
+// ----- Step 1: snapshot + delete old student.md ------------------------------
 
-const UPDATE_SYSTEM: &str = r#"You are a careful teaching assistant maintaining a student profile.
+struct DeleteOldStudentMd;
+#[async_trait]
+impl DeterministicStep for DeleteOldStudentMd {
+    async fn run(&self, ctx: &FlowCtx) -> Result<StepOutcome, FlowError> {
+        let dir = student_dir(ctx)?;
+        let path = dir.join(STUDENT_MD_FILENAME);
+        if !path.exists() {
+            return Err(FlowError::Step {
+                step: "delete-old-student-md".into(),
+                msg: format!(
+                    "no student.md at {} — has this student been added yet?",
+                    path.display()
+                ),
+            });
+        }
+        // Stash a backup so the agent prompt can include the prior content
+        // even after we delete the file.
+        let prior = tokio::fs::read_to_string(&path).await.map_err(|e| FlowError::Step {
+            step: "delete-old-student-md".into(),
+            msg: format!("read {}: {e}", path.display()),
+        })?;
+        let backup = dir.join(".student.md.prior");
+        tokio::fs::write(&backup, prior.as_bytes())
+            .await
+            .map_err(|e| FlowError::Step {
+                step: "delete-old-student-md".into(),
+                msg: format!("write {}: {e}", backup.display()),
+            })?;
+        tokio::fs::remove_file(&path).await.map_err(|e| FlowError::Step {
+            step: "delete-old-student-md".into(),
+            msg: format!("rm {}: {e}", path.display()),
+        })?;
+        Ok(StepOutcome::default())
+    }
+}
 
-You can ONLY use these tools:
-  - Read — reads `student.md` in the working directory.
-  - Edit — replaces an EXACT block of text in `student.md`.
+// ----- Step 2: rewrite-student (agent, one-shot Write) -----------------------
+
+const REWRITE_SYSTEM: &str = r##"You are a careful teaching assistant maintaining a student profile.
+
+You can ONLY use this tool:
+  - Write — creates a NEW file inside the working directory.
 
 How to use tools:
-  - Emit tool calls natively. Do NOT wrap in code fences or XML tags.
-  - First Read `student.md`.
-  - Then issue one or more Edit calls to apply the teacher's update notes.
-  - Prefer many small Edits over one big rewrite — change only what the notes ask for.
-  - After all edits succeed, reply: Done.
+  - Use `tool_code` fences to call tools, e.g.:
+    ```tool_code
+    Write(path="student.md", content="# Maya\n...")
+    ```
+  - One Write call is enough for this task. After Write succeeds, reply exactly: Done.
 
-Notes on Edit:
-  - `old_text` must match the file content EXACTLY (whitespace included).
-  - Include enough surrounding context in `old_text` to make the match unique.
-"#;
+NON-NEGOTIABLE rules:
+  - Preserve every detail from the prior profile that the teacher's notes do not change.
+  - Apply the teacher's update notes precisely — do not invent additional changes.
+  - Keep the same section structure as the prior profile.
+"##;
 
-struct UpdateStudent;
-impl AgentStepFactory for UpdateStudent {
+struct RewriteStudent;
+impl AgentStepFactory for RewriteStudent {
     fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
         let dir = student_dir(ctx).expect("student_dir");
+        let prior = std::fs::read_to_string(dir.join(".student.md.prior"))
+            .unwrap_or_else(|_| "(prior profile not found)".into());
         let edit_notes = ctx
             .inputs
             .get("edit_notes")
             .cloned()
             .unwrap_or_default();
         let task = format!(
-            r#"Read `student.md` and apply the teacher's update notes below using Edit.
+            r#"Update this student's profile by writing a NEW `{STUDENT_MD_FILENAME}` that incorporates the teacher's notes below. Preserve everything from the prior profile that the notes do not change.
 
-Teacher's update notes:
----
+After Write succeeds, reply: Done.
+
+--- prior student.md ---
+{prior}
+--- end of prior student.md ---
+
+--- teacher's update notes ---
 {edit_notes}
----
-
-After all edits succeed, reply: Done."#
+--- end of update notes ---"#
         );
-        SessionBuilder::new("update-student", dir)
-            .system_prompt(UPDATE_SYSTEM)
+        SessionBuilder::new("rewrite-student", dir)
+            .system_prompt(REWRITE_SYSTEM)
             .task_prompt(task)
-            .allowed_tools(["Read", "Edit"])
+            .allowed_tools(["Write"])
             .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
     }
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
@@ -100,7 +150,7 @@ After all edits succeed, reply: Done."#
     }
 }
 
-// ----- Step 2: delete-old-tags ----------------------------------------------
+// ----- Step 3: delete old tags ------------------------------------------------
 
 struct DeleteOldTags;
 #[async_trait]
@@ -108,7 +158,6 @@ impl DeterministicStep for DeleteOldTags {
     async fn run(&self, ctx: &FlowCtx) -> Result<StepOutcome, FlowError> {
         let dir = student_dir(ctx)?;
         let path = dir.join(TAGS_JSON_FILENAME);
-        // Tolerate already-missing.
         if path.exists() {
             tokio::fs::remove_file(&path)
                 .await
@@ -117,35 +166,54 @@ impl DeterministicStep for DeleteOldTags {
                     msg: format!("rm {}: {e}", path.display()),
                 })?;
         }
+        // Clean up the prior backup now that we've moved past rewrite-student.
+        let backup = dir.join(".student.md.prior");
+        if backup.exists() {
+            let _ = tokio::fs::remove_file(&backup).await;
+        }
         Ok(StepOutcome::default())
     }
 }
 
-// ----- Step 3: refresh-tags --------------------------------------------------
+// ----- Step 4: refresh-tags (agent, one-shot Write) ---------------------------
 
-const REFRESH_SYSTEM: &str = r#"You are a careful teaching assistant.
+const REFRESH_SYSTEM: &str = r##"You are a careful teaching assistant.
 
-You can ONLY use these tools:
-  - Read  — reads `student.md`.
-  - Write — creates a NEW file `tags.json`.
+You can ONLY use this tool:
+  - Write — creates a NEW file inside the working directory.
 
 How to use tools:
-  - Emit tool calls natively. Do NOT wrap in code fences or XML tags.
-  - First Read `student.md` to see the updated profile.
-  - Then Write `tags.json` with a valid JSON array of lowercase kebab-case strings.
-  - After Write succeeds, reply: Done.
-"#;
+  - Use `tool_code` fences to call tools, e.g.:
+    ```tool_code
+    Write(path="tags.json", content="[\"anime\", \"marine-biology\"]")
+    ```
+  - One Write call is enough for this task. After Write succeeds, reply exactly: Done.
+
+Output format for `tags.json` (MANDATORY):
+A single JSON array, each element a string of one to three words separated by hyphens.
+Examples of valid tags: "anime", "k-pop", "marine-biology", "competitive-chess".
+Do NOT include explanations, code fences, or any other text in `tags.json`.
+"##;
 
 struct RefreshTags;
 impl AgentStepFactory for RefreshTags {
     fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
         let dir = student_dir(ctx).expect("student_dir");
+        let profile = std::fs::read_to_string(dir.join(STUDENT_MD_FILENAME))
+            .unwrap_or_else(|_| "(student.md not found)".into());
+        let task = format!(
+            r#"Below is a student's profile. Extract 4-10 interest tags as lowercase kebab-case strings (one to three words each, e.g. "marine-biology", "studio-ghibli"), and write them as a JSON array to `{TAGS_JSON_FILENAME}`.
+
+After Write succeeds, reply: Done.
+
+--- student.md ---
+{profile}
+--- end of student.md ---"#
+        );
         SessionBuilder::new("refresh-tags", dir)
             .system_prompt(REFRESH_SYSTEM)
-            .task_prompt(
-                "Read `student.md` and regenerate `tags.json`. Use lowercase kebab-case tags, 4-10 of them. After Write succeeds, reply: Done.".to_string(),
-            )
-            .allowed_tools(["Read", "Write"])
+            .task_prompt(task)
+            .allowed_tools(["Write"])
             .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
     }
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
@@ -153,7 +221,7 @@ impl AgentStepFactory for RefreshTags {
     }
 }
 
-// ----- Step 4: validate-tags -------------------------------------------------
+// ----- Step 5: validate-tags --------------------------------------------------
 
 struct ValidateTags;
 #[async_trait]

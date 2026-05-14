@@ -342,6 +342,14 @@ impl SessionBuilder {
                 break;
             }
 
+            // Honor a completion marker emitted alongside tool calls. Small
+            // models often emit their entire intent in one turn — e.g.,
+            // "Write student.md\n```...```\nDone." — which the parser
+            // converts to a tool call plus residual text "Done.". Without
+            // this check the loop would spin asking the model to "continue"
+            // and get empty turns (then trip the quality monitor's loop cap).
+            let said_done = is_completion_marker(&parsed.text);
+
             // ----- Execute each tool call -----
             let mut any_tool_error = false;
             let mut next_recent: Vec<(String, serde_json::Value)> = Vec::new();
@@ -420,8 +428,15 @@ impl SessionBuilder {
             }
 
             recent_calls.previous = next_recent;
-            // suppress unused warning when no tool errors
-            let _ = any_tool_error;
+
+            // If the model signalled completion alongside its tool calls
+            // ("Done." in the residual text) and every tool succeeded, end
+            // the session now. Otherwise we'd ask the model to continue and
+            // typically get an empty turn that trips the quality monitor.
+            if said_done && !any_tool_error {
+                final_message = Some(parsed.text.clone());
+                break;
+            }
         }
 
         let outcome = SessionOutcome {
@@ -432,17 +447,15 @@ impl SessionBuilder {
         };
 
         // Decide between Done and TurnCap based on whether we exited the loop
-        // via the no-tool-calls branch (in which case `final_message` may be
-        // set OR the model just said nothing).
-        // We treat reaching the end of the loop with no break as turn-cap.
-        // Track via a sentinel: if assistant final break happened, final_message
-        // is `Some(_)` OR history's last message is from the assistant with no tool calls.
-        let last_was_done = history
+        // via a completion branch. Completion = the last assistant message has
+        // no tool calls OR `final_message` was set on the said-done path.
+        let last_was_text_only = history
             .last()
             .map(|m| m.role == MessageRole::Assistant && m.tool_calls.is_empty())
             .unwrap_or(false);
+        let completed = last_was_text_only || final_message.is_some();
 
-        if !last_was_done {
+        if !completed {
             let err = SessionError::TurnCap(self.model_profile.turn_cap);
             self.event_sink
                 .emit(SessionEvent::Failed {
@@ -478,6 +491,17 @@ impl SessionBuilder {
 
 fn embedded_call_nudge() -> String {
     "Your tool call was embedded in text (code fence or XML tag). Re-issue tool calls using the native tool-call channel — emit them as structured calls, not inside ``` blocks or <tool_call> tags.".into()
+}
+
+/// Markers a session-prompt convention may use to signal completion. Kept
+/// permissive: small models tend to drift between casings.
+fn is_completion_marker(text: &str) -> bool {
+    let t = text.trim().trim_end_matches('.');
+    if t.is_empty() {
+        return false;
+    }
+    let upper = t.to_ascii_uppercase();
+    matches!(upper.as_str(), "DONE" | "COMPLETE" | "FINISHED" | "OK" | "DONE!")
 }
 
 // quiet the warning for the unused QualityIssueKind enum import path when
