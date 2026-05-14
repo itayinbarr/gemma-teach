@@ -4,6 +4,8 @@
 pub enum Slash {
     StudentAdd,
     ClassPlan { pdf: std::path::PathBuf },
+    /// `/class-plan` with no argument — open the input modal.
+    ClassPlanModal,
     StudentEdit { name: String },
     Help,
     Quit,
@@ -20,13 +22,18 @@ pub fn parse(line: &str) -> Option<Slash> {
         "student-add" => Some(Slash::StudentAdd),
         "class-plan" => {
             if rest.is_empty() {
-                Some(Slash::Unknown(
-                    "/class-plan needs a path: /class-plan /path/to/chapter.pdf".into(),
-                ))
+                Some(Slash::ClassPlanModal)
             } else {
-                Some(Slash::ClassPlan {
-                    pdf: rest.join(" ").into(),
-                })
+                let raw = rest.join(" ");
+                // Expand a leading `~/` so users can type ~/Downloads/foo.pdf.
+                let expanded = if let Some(stripped) = raw.strip_prefix("~/") {
+                    dirs::home_dir()
+                        .map(|h| h.join(stripped))
+                        .unwrap_or_else(|| std::path::PathBuf::from(raw.clone()))
+                } else {
+                    std::path::PathBuf::from(raw)
+                };
+                Some(Slash::ClassPlan { pdf: expanded })
             }
         }
         "student-edit" => {
@@ -57,10 +64,27 @@ mod tests {
     }
 
     #[test]
-    fn class_plan_requires_arg() {
-        assert!(matches!(parse("/class-plan"), Some(Slash::Unknown(_))));
+    fn class_plan_no_arg_opens_modal() {
+        assert!(matches!(parse("/class-plan"), Some(Slash::ClassPlanModal)));
+    }
+
+    #[test]
+    fn class_plan_with_path() {
         match parse("/class-plan /tmp/foo.pdf").unwrap() {
             Slash::ClassPlan { pdf } => assert_eq!(pdf.to_str(), Some("/tmp/foo.pdf")),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn class_plan_expands_tilde() {
+        match parse("/class-plan ~/Documents/x.pdf").unwrap() {
+            Slash::ClassPlan { pdf } => {
+                // Should not start with `~` after expansion (assuming HOME is set).
+                if let Some(home) = dirs::home_dir() {
+                    assert!(pdf.starts_with(&home), "got: {}", pdf.display());
+                }
+            }
             _ => panic!(),
         }
     }

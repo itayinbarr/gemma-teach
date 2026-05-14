@@ -15,6 +15,8 @@ pub mod class_plan;
 pub mod student_add;
 pub mod student_edit;
 
+pub use class_plan::ClassPlanSource;
+
 pub use artifacts::{ArtifactKey, ArtifactMap};
 pub use context::FlowCtx;
 pub use orchestrator::{Orchestrator, OrchestratorHandle};

@@ -1,48 +1,94 @@
-//! Run `/student-add` against the real Gemma 3n E2B model and dump every
-//! event (flow + session) as JSONL. Used for the trace-driven tuning loop
-//! described in the plan.
+//! Drive any of the three feature flows against the real Gemma 3n E2B
+//! backend and dump every event as JSONL with per-step tok/s telemetry.
+//!
+//! Examples
 //!
 //!     cargo run -p gt-flows --example record_trace --features smoke -- \
-//!         --name "Maya" \
-//!         --description "12 years old. Loves Studio Ghibli films and marine biology." \
-//!         --out traces/student-add-1.jsonl
+//!         student-add --name "Maya" \
+//!         --description "12 years old. Loves Studio Ghibli, marine biology." \
+//!         --notebook ~/GemmaTeach \
+//!         --out traces/maya.jsonl
 //!
-//! The example writes one JSON object per line. The trailing newline is
-//! deliberate; tail -f the file to watch live.
+//!     cargo run -p gt-flows --example record_trace --features smoke -- \
+//!         class-plan --source-txt /tmp/chapter.txt \
+//!         --notebook ~/GemmaTeach \
+//!         --out traces/class-plan.jsonl
+//!
+//!     cargo run -p gt-flows --example record_trace --features smoke -- \
+//!         student-edit --name "Maya" \
+//!         --notes "Started chess. Drop swimming." \
+//!         --notebook ~/GemmaTeach \
+//!         --out traces/maya-edit.jsonl
+//!
+//! `--notebook` defaults to a fresh tempdir if omitted. `--out` defaults to
+//! `traces/<flow>.jsonl`.
 
 use chrono::NaiveDate;
 use gt_core::backend::LlmBackend;
 use gt_core::tool::ToolRegistry;
 use gt_flows::orchestrator::Orchestrator;
-use gt_flows::student_add::flow_with_ctx;
+use gt_flows::Flow;
+use gt_flows::FlowCtx;
+use gt_tools::{MockOcrRunner, TypstRunner};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
-#[derive(serde::Parser, Debug)]
-#[cfg(any())] // placeholder so cargo-fmt doesn't complain about unused derive — we parse args manually below.
-struct Unused;
+#[derive(Debug)]
+enum Cmd {
+    StudentAdd {
+        name: String,
+        description: String,
+    },
+    ClassPlan {
+        source_txt: PathBuf,
+    },
+    StudentEdit {
+        name: String,
+        notes: String,
+    },
+}
 
 #[derive(Debug, Default)]
 struct Args {
-    name: Option<String>,
-    description: Option<String>,
+    cmd: Option<Cmd>,
     notebook: Option<PathBuf>,
     out: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
     let mut a = Args::default();
-    let mut it = std::env::args().skip(1);
+    let mut it = std::env::args().skip(1).peekable();
+    let head = match it.next() {
+        Some(h) if !h.starts_with("--") => h,
+        Some(other) => {
+            // Backward-compat: if first arg starts with `--`, default to student-add.
+            let mut rest: Vec<String> = vec![other];
+            rest.extend(it);
+            return reparse_legacy(rest);
+        }
+        None => {
+            print_help();
+            std::process::exit(0);
+        }
+    };
+
+    let mut name: Option<String> = None;
+    let mut description: Option<String> = None;
+    let mut notes: Option<String> = None;
+    let mut source_txt: Option<PathBuf> = None;
+
     while let Some(flag) = it.next() {
         match flag.as_str() {
-            "--name" => a.name = it.next(),
-            "--description" => a.description = it.next(),
+            "--name" => name = it.next(),
+            "--description" => description = it.next(),
+            "--notes" => notes = it.next(),
+            "--source-txt" => source_txt = it.next().map(PathBuf::from),
             "--notebook" => a.notebook = it.next().map(PathBuf::from),
             "--out" => a.out = it.next().map(PathBuf::from),
             "--help" | "-h" => {
-                eprintln!("record_trace --name <NAME> --description <TEXT> [--notebook <DIR>] [--out <FILE>]");
+                print_help();
                 std::process::exit(0);
             }
             other => {
@@ -51,7 +97,54 @@ fn parse_args() -> Args {
             }
         }
     }
+
+    a.cmd = Some(match head.as_str() {
+        "student-add" => Cmd::StudentAdd {
+            name: name.unwrap_or_else(|| "Maya".into()),
+            description: description.unwrap_or_else(|| "12 years old.".into()),
+        },
+        "class-plan" => Cmd::ClassPlan {
+            source_txt: source_txt.expect("class-plan requires --source-txt"),
+        },
+        "student-edit" => Cmd::StudentEdit {
+            name: name.expect("student-edit requires --name"),
+            notes: notes.expect("student-edit requires --notes"),
+        },
+        other => {
+            eprintln!("unknown flow: {other}");
+            std::process::exit(2);
+        }
+    });
     a
+}
+
+fn reparse_legacy(rest: Vec<String>) -> Args {
+    let mut a = Args::default();
+    let mut name = None;
+    let mut description = None;
+    let mut it = rest.into_iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--name" => name = it.next(),
+            "--description" => description = it.next(),
+            "--notebook" => a.notebook = it.next().map(PathBuf::from),
+            "--out" => a.out = it.next().map(PathBuf::from),
+            _ => {}
+        }
+    }
+    a.cmd = Some(Cmd::StudentAdd {
+        name: name.unwrap_or_else(|| "Maya".into()),
+        description: description.unwrap_or_else(|| "12 years old.".into()),
+    });
+    a
+}
+
+fn print_help() {
+    eprintln!("usage:");
+    eprintln!("  record_trace student-add  --name <NAME> --description <TEXT>");
+    eprintln!("  record_trace class-plan   --source-txt <FILE>");
+    eprintln!("  record_trace student-edit --name <NAME> --notes <TEXT>");
+    eprintln!("common: --notebook <DIR>   --out <FILE>");
 }
 
 #[derive(Debug, Serialize)]
@@ -67,18 +160,16 @@ enum TraceRecord {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args();
-    let name = args.name.unwrap_or_else(|| "Maya".to_string());
-    let description = args.description.unwrap_or_else(|| {
-        "12 years old. Loves Studio Ghibli films and marine biology. Plays piano and draws.".into()
+    let cmd = args.cmd.unwrap();
+    let notebook = args.notebook.clone().unwrap_or_else(|| {
+        tempfile::tempdir().expect("tempdir").keep()
     });
-    let notebook = args.notebook.unwrap_or_else(|| {
-        let tmp = tempfile::tempdir().expect("tempdir").keep();
-        tmp
+    tokio::fs::create_dir_all(&notebook).await?;
+    let out = args.out.clone().unwrap_or_else(|| match &cmd {
+        Cmd::StudentAdd { .. } => "traces/student-add.jsonl".into(),
+        Cmd::ClassPlan { .. } => "traces/class-plan.jsonl".into(),
+        Cmd::StudentEdit { .. } => "traces/student-edit.jsonl".into(),
     });
-    let out = args
-        .out
-        .unwrap_or_else(|| PathBuf::from("traces/student-add-trace.jsonl"));
-
     if let Some(parent) = out.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -93,32 +184,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register(Arc::new(gt_tools::WriteTool))
         .register(Arc::new(gt_tools::EditTool));
 
-    let (flow, ctx) = flow_with_ctx(
-        notebook.clone(),
-        NaiveDate::from_ymd_opt(2026, 5, 15).unwrap(),
-        name,
-        description,
-    );
+    let date = NaiveDate::from_ymd_opt(2026, 5, 15).unwrap();
+    let templates = templates_dir();
+    let (flow, ctx): (Flow, FlowCtx) = match cmd {
+        Cmd::StudentAdd { name, description } => {
+            gt_flows::student_add::flow_with_ctx(notebook.clone(), date, name, description)
+        }
+        Cmd::ClassPlan { source_txt } => {
+            let source = tokio::fs::read_to_string(&source_txt).await?;
+            let ocr: Arc<dyn gt_tools::OcrRunner> = Arc::new(MockOcrRunner { text: source });
+            let pdf: Arc<dyn gt_tools::PdfRunner> = Arc::new(TypstRunner::new());
+            // /class-plan needs a real pdf path argument even though we mock OCR.
+            let dummy_pdf = notebook.join(".dummy.pdf");
+            if !dummy_pdf.exists() {
+                tokio::fs::write(&dummy_pdf, b"placeholder").await?;
+            }
+            gt_flows::class_plan::flow_with_ctx(notebook.clone(), date, dummy_pdf, ocr, pdf, templates)?
+        }
+        Cmd::StudentEdit { name, notes } => {
+            gt_flows::student_edit::flow_with_ctx(notebook.clone(), date, name, notes)
+        }
+    };
 
     let orch = Orchestrator::new(backend, tools);
     let mut handle = orch.start(flow, ctx);
 
-    // Pick up each session-event receiver and route it to the trace file via
-    // a tagged record. We need to know which step each event belongs to, so
-    // pre-build a map from StepId to step name as we see FlowStarted.
     let mut step_names: std::collections::HashMap<gt_core::ids::StepId, String> =
         std::collections::HashMap::new();
-
-    // Forward all session channels onto a single sink so we can interleave
-    // them with flow events in source order.
     let (sink, mut sink_rx) =
         tokio::sync::mpsc::channel::<(String, gt_core::session_event::SessionEvent)>(256);
     let session_rxs: Vec<(gt_core::ids::StepId, _)> = handle.session_events.drain().collect();
     for (id, mut rx) in session_rxs {
         let sink = sink.clone();
-        // We need the step name. Until FlowStarted arrives we don't know it,
-        // so use the StepId's short hex as a placeholder; we'll rewrite once
-        // we see FlowStarted in the join task below.
         let placeholder = format!("step:{id}");
         tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
@@ -128,9 +225,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-    drop(sink); // close once all session tasks are done
+    drop(sink);
 
-    // Per-step counters for tok/s telemetry.
     let mut step_token_count: std::collections::HashMap<String, u64> =
         std::collections::HashMap::new();
     let mut step_turn_start: std::collections::HashMap<String, std::time::Instant> =
@@ -138,7 +234,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_start = std::time::Instant::now();
     let mut total_tokens: u64 = 0;
 
-    // Drain interleaved.
     loop {
         tokio::select! {
             biased;
@@ -169,7 +264,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             step = name;
                         }
-                        // tok/s accounting
                         use gt_core::session_event::SessionEvent as SE;
                         match &ev {
                             SE::TurnStarted { turn } => {
@@ -217,7 +311,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Wait for the orchestrator task to finish (it may have already).
     match handle.join.await {
         Ok(Ok(_)) => eprintln!("flow done."),
         Ok(Err(e)) => eprintln!("flow failed: {e}"),
@@ -233,6 +326,15 @@ async fn emit(file: &mut tokio::fs::File, rec: &TraceRecord) -> std::io::Result<
     line.push(b'\n');
     file.write_all(&line).await?;
     file.flush().await
+}
+
+fn templates_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("templates/typst")
 }
 
 #[cfg(feature = "smoke")]

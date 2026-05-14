@@ -15,7 +15,8 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 use std::time::{Duration, Instant};
 
-use crate::app::{App, AppMode, FormField, StudentAddForm, StudentEditForm};
+use crate::app::{App, AppMode, ClassPlanField, ClassPlanForm, FormField, StudentAddForm, StudentEditForm};
+use gt_flows::class_plan::ClassPlanSource;
 use crate::slash::{parse, Slash};
 use crate::theme;
 
@@ -103,6 +104,59 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             }
             _ => {}
         },
+        AppMode::ClassPlanModal(form) => match k.code {
+            KeyCode::Esc => app.mode = AppMode::Idle,
+            KeyCode::Tab => {
+                form.focus = match form.focus {
+                    ClassPlanField::Path => ClassPlanField::Pasted,
+                    ClassPlanField::Pasted => ClassPlanField::Path,
+                };
+            }
+            // Submit logic: prefer the focused field's content.
+            KeyCode::Enter
+                if matches!(form.focus, ClassPlanField::Pasted)
+                    && k.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                form.pasted.push('\n');
+            }
+            KeyCode::Enter => {
+                let path = form.path.trim().to_string();
+                let pasted = form.pasted.trim().to_string();
+                let source = if !path.is_empty() {
+                    let expanded = if let Some(stripped) = path.strip_prefix("~/") {
+                        dirs::home_dir()
+                            .map(|h| h.join(stripped))
+                            .unwrap_or_else(|| std::path::PathBuf::from(path.clone()))
+                    } else {
+                        std::path::PathBuf::from(path.clone())
+                    };
+                    if !expanded.exists() {
+                        app.log(format!("File not found: {}", expanded.display()));
+                        return;
+                    }
+                    ClassPlanSource::from_path(expanded)
+                } else if !pasted.is_empty() {
+                    ClassPlanSource::Text(pasted)
+                } else {
+                    app.log("Provide a file path or paste the chapter text.");
+                    return;
+                };
+                app.start_class_plan(source);
+            }
+            KeyCode::Backspace => match form.focus {
+                ClassPlanField::Path => {
+                    form.path.pop();
+                }
+                ClassPlanField::Pasted => {
+                    form.pasted.pop();
+                }
+            },
+            KeyCode::Char(c) => match form.focus {
+                ClassPlanField::Path => form.path.push(c),
+                ClassPlanField::Pasted => form.pasted.push(c),
+            },
+            _ => {}
+        },
         AppMode::StudentEditModal(form) => match k.code {
             KeyCode::Esc => app.mode = AppMode::Idle,
             // Shift-Enter inserts a newline; plain Enter submits.
@@ -187,11 +241,23 @@ fn submit_slash(app: &mut App, line: &str) {
             app.mode = AppMode::StudentAddModal(StudentAddForm::default());
         }
         Some(Slash::ClassPlan { pdf }) => {
-            if !pdf.exists() {
-                app.log(format!("/class-plan: PDF not found at {}", pdf.display()));
+            // Argument form: route based on extension. Falls back to the
+            // modal when the file doesn't exist so the user can correct
+            // the path or switch to pasted text.
+            if pdf.exists() {
+                app.start_class_plan(ClassPlanSource::from_path(pdf));
             } else {
-                app.start_class_plan(pdf);
+                app.log(format!(
+                    "/class-plan: '{}' not found — opening input modal",
+                    pdf.display()
+                ));
+                let mut form = ClassPlanForm::default();
+                form.path = pdf.display().to_string();
+                app.mode = AppMode::ClassPlanModal(form);
             }
+        }
+        Some(Slash::ClassPlanModal) => {
+            app.mode = AppMode::ClassPlanModal(ClassPlanForm::default());
         }
         Some(Slash::StudentEdit { name }) => {
             // Verify the student exists.
@@ -244,9 +310,90 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
     if let AppMode::StudentEditModal(form) = &app.mode {
         draw_edit_modal(f, area, form);
     }
+    if let AppMode::ClassPlanModal(form) = &app.mode {
+        draw_class_plan_modal(f, area, form);
+    }
     if matches!(app.mode, AppMode::Help) {
         draw_help_modal(f, area);
     }
+}
+
+fn draw_class_plan_modal(f: &mut ratatui::Frame, area: Rect, form: &ClassPlanForm) {
+    let centered = centered_rect(80, 80, area);
+    f.render_widget(ratatui::widgets::Clear, centered);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // header
+            Constraint::Length(3),  // path field
+            Constraint::Length(2),  // OR divider
+            Constraint::Min(5),     // pasted textarea
+            Constraint::Length(2),  // hint
+        ])
+        .split(centered);
+
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "/class-plan ",
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("— attach a chapter as .pdf (auto-OCR), .txt, or paste below"),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::MUTED)),
+    );
+    f.render_widget(header, layout[0]);
+
+    let path_focused = matches!(form.focus, ClassPlanField::Path);
+    let pasted_focused = matches!(form.focus, ClassPlanField::Pasted);
+
+    let path_block = Block::default()
+        .title(" Path  (.pdf / .txt; ~/ allowed) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if path_focused {
+            theme::ACCENT
+        } else {
+            theme::MUTED
+        }));
+    f.render_widget(Paragraph::new(form.path.as_str()).block(path_block), layout[1]);
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "── or paste the chapter text below ──",
+            Style::default().fg(theme::MUTED),
+        )))
+        .alignment(ratatui::layout::Alignment::Center),
+        layout[2],
+    );
+
+    let pasted_block = Block::default()
+        .title(" Pasted text ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if pasted_focused {
+            theme::ACCENT
+        } else {
+            theme::MUTED
+        }));
+    f.render_widget(
+        Paragraph::new(form.pasted.as_str())
+            .block(pasted_block)
+            .wrap(Wrap { trim: false }),
+        layout[3],
+    );
+
+    let hint = Paragraph::new(Line::from(vec![
+        Span::styled("Tab", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::raw(" switch field    "),
+        Span::styled("Enter", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::raw(" submit    "),
+        Span::styled("Shift-Enter", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::raw(" newline in paste    "),
+        Span::styled("Esc", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::raw(" cancel"),
+    ]));
+    f.render_widget(hint, layout[4]);
 }
 
 fn draw_edit_modal(f: &mut ratatui::Frame, area: Rect, form: &StudentEditForm) {
@@ -518,7 +665,8 @@ fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {
     let body = vec![
         Line::from("Slash commands:"),
         Line::from("  /student-add                   add a student"),
-        Line::from("  /class-plan <pdf>              build a lesson from a PDF"),
+        Line::from("  /class-plan                    open the chapter-attach modal"),
+        Line::from("  /class-plan <path>             pdf (auto-OCR) or txt — quick form"),
         Line::from("  /student-edit <name>           update a student's profile"),
         Line::from("  /help                          show this screen"),
         Line::from("  /quit                          exit"),

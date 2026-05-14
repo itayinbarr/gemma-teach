@@ -61,22 +61,25 @@ impl PdfRunner for TypstRunner {
             .await
             .map_err(|e| PdfError::Spawn(format!("read md: {e}")))?;
 
-        // Build a Typst entrypoint that imports the template and renders the body.
-        // We render Markdown by converting it inline — Typst's native markdown
-        // import isn't universally available, so we use a small heuristic
-        // conversion to Typst markup.
+        // Typst's `#import` doesn't accept absolute paths, so we copy the
+        // template into the same tempdir as our generated entry.typ and
+        // import it by a relative name.
+        let tmp = tempfile::tempdir().map_err(|e| PdfError::Spawn(e.to_string()))?;
+        let template_local = tmp.path().join("template.typ");
+        tokio::fs::copy(template_path, &template_local)
+            .await
+            .map_err(|e| PdfError::Spawn(format!("copy template: {e}")))?;
+
         let typst_src = format!(
-            r#"#import "{template}" as template
+            r#"#import "template.typ" as template
 #show: template.notes.with(title: "{title}")
 
 {body}
 "#,
-            template = template_path.display(),
             title = filename_to_title(md_path),
             body = md_to_typst(&md_text),
         );
 
-        let tmp = tempfile::tempdir().map_err(|e| PdfError::Spawn(e.to_string()))?;
         let entry = tmp.path().join("entry.typ");
         tokio::fs::write(&entry, typst_src.as_bytes())
             .await

@@ -12,6 +12,28 @@ use std::sync::Arc;
 use crate::context::FlowCtx;
 use crate::step::{AgentStepFactory, DeterministicStep, Flow, FlowError, StepNode, StepOutcome};
 
+/// Where the class-plan source content comes from. Three accepted shapes:
+/// a PDF file (OCR'd via Tesseract), a plain-text file (used as-is), or
+/// inline text (typically pasted in the TUI).
+#[derive(Debug, Clone)]
+pub enum ClassPlanSource {
+    Pdf(PathBuf),
+    TextFile(PathBuf),
+    Text(String),
+}
+
+impl ClassPlanSource {
+    /// Detect the source kind from a path extension. `.pdf` is OCR'd; anything
+    /// else is treated as a plain text file.
+    pub fn from_path(p: PathBuf) -> Self {
+        if p.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("pdf")) == Some(true) {
+            Self::Pdf(p)
+        } else {
+            Self::TextFile(p)
+        }
+    }
+}
+
 const LESSON_DIR_KEY: &str = "lesson_dir";
 const SOURCE_TXT_KEY: &str = "source_txt";
 const CLASS_NOTES_KEY: &str = "class_notes_md";
@@ -28,10 +50,21 @@ pub fn build_flow(
     pdf: Arc<dyn PdfRunner>,
     templates_dir: PathBuf,
     student_slugs: Vec<String>,
+    source: ClassPlanSource,
 ) -> Flow {
+    let prep_step: Box<dyn DeterministicStep> = match source {
+        ClassPlanSource::Pdf(p) => Box::new(OcrSource { ocr: ocr.clone(), pdf_path: p }),
+        ClassPlanSource::TextFile(p) => Box::new(LoadTextSource::FromFile(p)),
+        ClassPlanSource::Text(t) => Box::new(LoadTextSource::Inline(t)),
+    };
     let mut steps = vec![
         StepNode::det("mk-lesson-dir", MkLessonDir),
-        StepNode::det("ocr-source", OcrSource { ocr: ocr.clone() }),
+        StepNode {
+            id: gt_core::ids::StepId::new(),
+            name: "prepare-source".into(),
+            kind: crate::step::StepKind::Deterministic(prep_step),
+            parallel_group: None,
+        },
         StepNode::agent("write-class-notes", WriteClassNotes),
         StepNode::agent("write-homework", WriteHomework),
     ];
@@ -73,11 +106,11 @@ pub fn build_flow(
     Flow::new("/class-plan".to_string(), steps)
 }
 
-/// Public convenience: build a flow plus a `FlowCtx` carrying the inputs.
-pub fn flow_with_ctx(
+/// Public convenience: build a flow + a `FlowCtx` from any `ClassPlanSource`.
+pub fn flow_with_ctx_from_source(
     root: PathBuf,
     date: NaiveDate,
-    pdf_path: PathBuf,
+    source: ClassPlanSource,
     ocr: Arc<dyn OcrRunner>,
     pdf: Arc<dyn PdfRunner>,
     templates_dir: PathBuf,
@@ -94,10 +127,21 @@ pub fn flow_with_ctx(
         }
     }
     slugs.sort();
-
-    let ctx = FlowCtx::new(&root, date).with_input("pdf_path", pdf_path.display().to_string());
-    let flow = build_flow(ocr, pdf, templates_dir, slugs);
+    let ctx = FlowCtx::new(&root, date);
+    let flow = build_flow(ocr, pdf, templates_dir, slugs, source);
     Ok((flow, ctx))
+}
+
+/// Back-compat shim: build with a PDF path.
+pub fn flow_with_ctx(
+    root: PathBuf,
+    date: NaiveDate,
+    pdf_path: PathBuf,
+    ocr: Arc<dyn OcrRunner>,
+    pdf: Arc<dyn PdfRunner>,
+    templates_dir: PathBuf,
+) -> Result<(Flow, FlowCtx), FlowError> {
+    flow_with_ctx_from_source(root, date, ClassPlanSource::Pdf(pdf_path), ocr, pdf, templates_dir)
 }
 
 // ----- Step 1: mk-lesson-dir ------------------------------------------------
@@ -129,22 +173,49 @@ impl DeterministicStep for MkLessonDir {
 
 struct OcrSource {
     ocr: Arc<dyn OcrRunner>,
+    pdf_path: PathBuf,
 }
 #[async_trait]
 impl DeterministicStep for OcrSource {
     async fn run(&self, ctx: &FlowCtx) -> Result<StepOutcome, FlowError> {
-        let pdf = ctx
-            .inputs
-            .get("pdf_path")
-            .ok_or_else(|| FlowError::Internal("flow input 'pdf_path' missing".into()))?;
         let dir = lesson_dir(ctx);
         let out = dir.join(SOURCE_TXT_FILENAME);
         self.ocr
-            .ocr_pdf_to_text(std::path::Path::new(pdf), &out)
+            .ocr_pdf_to_text(&self.pdf_path, &out)
             .await
             .map_err(|e| FlowError::Step {
-                step: "ocr-source".into(),
+                step: "prepare-source".into(),
                 msg: e.to_string(),
+            })?;
+        Ok(StepOutcome {
+            outputs: vec![(SOURCE_TXT_KEY.into(), out)],
+        })
+    }
+}
+
+enum LoadTextSource {
+    FromFile(PathBuf),
+    Inline(String),
+}
+#[async_trait]
+impl DeterministicStep for LoadTextSource {
+    async fn run(&self, ctx: &FlowCtx) -> Result<StepOutcome, FlowError> {
+        let dir = lesson_dir(ctx);
+        let out = dir.join(SOURCE_TXT_FILENAME);
+        let text = match self {
+            LoadTextSource::FromFile(p) => {
+                tokio::fs::read_to_string(p).await.map_err(|e| FlowError::Step {
+                    step: "prepare-source".into(),
+                    msg: format!("read {}: {e}", p.display()),
+                })?
+            }
+            LoadTextSource::Inline(t) => t.clone(),
+        };
+        tokio::fs::write(&out, text.as_bytes())
+            .await
+            .map_err(|e| FlowError::Step {
+                step: "prepare-source".into(),
+                msg: format!("write {}: {e}", out.display()),
             })?;
         Ok(StepOutcome {
             outputs: vec![(SOURCE_TXT_KEY.into(), out)],

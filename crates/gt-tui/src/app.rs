@@ -5,7 +5,7 @@ use gt_core::backend::LlmBackend;
 use gt_core::ids::StepId;
 use gt_core::session_event::{FlowEvent, SessionEvent, StepDescriptor, StepState};
 use gt_core::tool::ToolRegistry;
-use gt_flows::class_plan::flow_with_ctx as class_plan_flow;
+use gt_flows::class_plan::{flow_with_ctx_from_source, ClassPlanSource};
 use gt_flows::orchestrator::{Orchestrator, OrchestratorHandle};
 use gt_flows::student_add::flow_with_ctx as student_add_flow;
 use gt_flows::student_edit::flow_with_ctx as student_edit_flow;
@@ -31,8 +31,23 @@ pub enum AppMode {
     Idle,
     StudentAddModal(StudentAddForm),
     StudentEditModal(StudentEditForm),
+    ClassPlanModal(ClassPlanForm),
     FlowActive,
     Help,
+}
+
+#[derive(Debug, Default)]
+pub struct ClassPlanForm {
+    pub path: String,
+    pub pasted: String,
+    pub focus: ClassPlanField,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub enum ClassPlanField {
+    #[default]
+    Path,
+    Pasted,
 }
 
 #[derive(Debug, Default)]
@@ -189,19 +204,23 @@ impl App {
         self.kick_off("/student-add", format!("Starting /student-add for {name}…"), flow, ctx);
     }
 
-    pub fn start_class_plan(&mut self, pdf: PathBuf) {
+    pub fn start_class_plan(&mut self, source: ClassPlanSource) {
         let date = Local::now().date_naive();
         let ocr = Arc::new(TesseractRunner::new());
         let pdfr = Arc::new(TypstRunner::new());
         let templates = Self::templates_dir();
-        match class_plan_flow(self.root.clone(), date, pdf.clone(), ocr, pdfr, templates) {
+        let label = match &source {
+            ClassPlanSource::Pdf(p) => format!("Starting /class-plan {} (PDF — OCR)", p.display()),
+            ClassPlanSource::TextFile(p) => {
+                format!("Starting /class-plan {} (text file)", p.display())
+            }
+            ClassPlanSource::Text(t) => {
+                format!("Starting /class-plan (pasted text, {} chars)", t.len())
+            }
+        };
+        match flow_with_ctx_from_source(self.root.clone(), date, source, ocr, pdfr, templates) {
             Ok((flow, ctx)) => {
-                self.kick_off(
-                    "/class-plan",
-                    format!("Starting /class-plan {}", pdf.display()),
-                    flow,
-                    ctx,
-                );
+                self.kick_off("/class-plan", label, flow, ctx);
             }
             Err(e) => self.log(format!("/class-plan failed to build flow: {e}")),
         }

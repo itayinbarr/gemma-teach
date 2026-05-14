@@ -44,7 +44,10 @@ impl LlamaConfig {
     pub fn new(model_path: PathBuf) -> Self {
         Self {
             model_path,
-            n_ctx: 8192,
+            // 32K context — Gemma 3n is small enough that KV cache at this
+            // size is comfortable on M-series, and /class-plan tailoring
+            // sessions easily pre-load 4K+ tokens of student + lesson context.
+            n_ctx: 32_768,
             n_gpu_layers: 999, // offload everything to Metal
         }
     }
@@ -150,27 +153,35 @@ impl LlmBackend for LlamaCppBackend {
                 }
             };
 
-            let mut batch = LlamaBatch::new(512, 1);
-            let last_idx = (tokens_list.len() as i32).saturating_sub(1);
-            for (i, tok) in tokens_list.iter().enumerate() {
-                let is_last = i as i32 == last_idx;
-                if batch.add(*tok, i as i32, &[0], is_last).is_err() {
+            // Prefill in chunks so prompts longer than 512 tokens (class-plan
+            // pre-loads whole files) don't silently overflow the batch.
+            let prefill_chunk: usize = 512;
+            let mut batch = LlamaBatch::new(prefill_chunk, 1);
+            let total = tokens_list.len();
+            let mut idx: usize = 0;
+            while idx < total {
+                let chunk_end = (idx + prefill_chunk).min(total);
+                batch.clear();
+                let mut ok = true;
+                for j in idx..chunk_end {
+                    let pos = j as i32;
+                    let is_last = j + 1 == total;
+                    if batch.add(tokens_list[j], pos, &[0], is_last).is_err() {
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok || ctx.decode(&mut batch).is_err() {
                     let _ = tx.blocking_send(TokenEvent::Done {
                         stop_reason: StopReason::BackendAborted,
                         usage: Usage::default(),
                     });
                     return;
                 }
-            }
-            if ctx.decode(&mut batch).is_err() {
-                let _ = tx.blocking_send(TokenEvent::Done {
-                    stop_reason: StopReason::BackendAborted,
-                    usage: Usage::default(),
-                });
-                return;
+                idx = chunk_end;
             }
 
-            let mut n_cur = batch.n_tokens();
+            let mut n_cur = total as i32;
             let mut sampler = LlamaSampler::chain_simple([
                 LlamaSampler::temp(temperature),
                 LlamaSampler::top_k(40),
