@@ -1,0 +1,29 @@
+[package]
+name = "gt-flows"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gt-core = { path = "../gt-core" }
+gt-tools = { path = "../gt-tools" }
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+smoke = ["gt-core/backend-llama", "gt-core/model-fetch"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "fs", "process", "time"] }
+serde_json = { workspace = true }
+tempfile = "3"
+chrono = { workspace = true }

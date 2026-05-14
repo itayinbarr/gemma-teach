@@ -1,0 +1,34 @@
+[package]
+name = "gt-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+backend-llama = ["dep:llama-cpp-2", "dep:tokio-stream"]
+model-fetch = ["dep:reqwest", "dep:sha2", "dep:hex"]
+
+[dependencies]
+tokio = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Optional, feature-gated.
+llama-cpp-2 = { version = "0.1.146", optional = true, default-features = false, features = ["metal"] }
+tokio-stream = { version = "0.1", optional = true }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "stream", "json"] }
+sha2 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }

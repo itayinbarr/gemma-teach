@@ -1,0 +1,36 @@
+[package]
+name = "gt-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "gemma-teach"
+path = "src/main.rs"
+
+[features]
+default = ["llama"]
+llama = ["gt-core/backend-llama", "gt-core/model-fetch"]
+mock-only = []
+
+[dependencies]
+gt-core = { path = "../gt-core" }
+gt-tools = { path = "../gt-tools" }
+gt-flows = { path = "../gt-flows" }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+ratatui = "0.29"
+crossterm = "0.28"
+tui-textarea = "0.7"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "5"
+
