@@ -80,9 +80,17 @@ static UNQUOTED_KEY_RE: Lazy<Regex> =
 static TRAILING_COMMA_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r",\s*([\}\]])").expect("TRAILING_COMMA_RE"));
 
-/// Match any ```<lang>?\n…\n``` fence. We don't use this directly anymore —
-/// `extract_fences` walks the input char-by-char to support multiple, possibly
-/// adjacent, fences and to preserve byte offsets.
+/// Walk the input and extract every fenced block.
+///
+/// Two close-finding strategies:
+///   • generic langs (markdown, json, …) — first `````` after the open.
+///   • `tool_code`-style langs — string-aware: ``` inside a `"..."` or `'...'`
+///     string literal (with `\` escapes) does NOT close the fence. This is the
+///     load-bearing rule for handling Gemma calls like
+///       ```tool_code
+///       Write(path="x.md", content="…```…")
+///       ```
+///     where the model embeds literal backticks inside the content argument.
 fn extract_fences(s: &str) -> Vec<Fence> {
     let mut out = Vec::new();
     let bytes = s.as_bytes();
@@ -90,28 +98,31 @@ fn extract_fences(s: &str) -> Vec<Fence> {
     while i + 3 <= bytes.len() {
         if &bytes[i..i + 3] == b"```" {
             let open_start = i;
-            // language tag = until newline
             let mut j = i + 3;
             while j < bytes.len() && bytes[j] != b'\n' {
                 j += 1;
             }
             let lang_end = j;
-            let lang = std::str::from_utf8(&bytes[i + 3..lang_end]).unwrap_or("").trim().to_string();
+            let lang = std::str::from_utf8(&bytes[i + 3..lang_end])
+                .unwrap_or("")
+                .trim()
+                .to_string();
             let body_start = (j + 1).min(bytes.len());
-            // find closing ```
-            let mut k = body_start;
-            while k + 3 <= bytes.len() {
-                if &bytes[k..k + 3] == b"```" {
-                    break;
-                }
-                k += 1;
-            }
-            if k + 3 > bytes.len() {
+            let close_pos = if is_tool_code_lang(&lang.to_ascii_lowercase()) {
+                // Strict (string-aware) first; if the model emitted an
+                // unterminated string literal, fall back to plain close so
+                // we still get *some* body to feed to the lenient call
+                // parser below.
+                find_fence_close_string_aware(bytes, body_start)
+                    .or_else(|| find_fence_close_plain(bytes, body_start))
+            } else {
+                find_fence_close_plain(bytes, body_start)
+            };
+            let Some(body_end) = close_pos else {
                 // Unclosed fence — stop scanning.
                 break;
-            }
-            let body_end = k;
-            let close_end = k + 3;
+            };
+            let close_end = body_end + 3;
             let body = std::str::from_utf8(&bytes[body_start..body_end])
                 .unwrap_or("")
                 .trim_end_matches('\n')
@@ -127,6 +138,49 @@ fn extract_fences(s: &str) -> Vec<Fence> {
         }
     }
     out
+}
+
+fn find_fence_close_plain(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut k = start;
+    while k + 3 <= bytes.len() {
+        if &bytes[k..k + 3] == b"```" {
+            return Some(k);
+        }
+        k += 1;
+    }
+    None
+}
+
+fn find_fence_close_string_aware(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut k = start;
+    let mut in_str = false;
+    let mut quote: u8 = 0;
+    let mut esc = false;
+    while k < bytes.len() {
+        let b = bytes[k];
+        if in_str {
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == quote {
+                in_str = false;
+            }
+            k += 1;
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            in_str = true;
+            quote = b;
+            k += 1;
+            continue;
+        }
+        if k + 3 <= bytes.len() && &bytes[k..k + 3] == b"```" {
+            return Some(k);
+        }
+        k += 1;
+    }
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -437,6 +491,15 @@ fn parse_gemma_tool_code(body: &str) -> Option<RawToolCall> {
     if let Some(call) = parse_python_call(trimmed) {
         return Some(call);
     }
+    // Permissive fallback for the case where the model left the call
+    // syntactically broken (e.g., unterminated `content="..."` because the
+    // content itself contains backticks the model conflated with a fence
+    // close). Captured live from Gemma 3n traces; without this we drop the
+    // whole call and the flow downstream tries to compile a non-existent
+    // .md file.
+    if let Some(call) = parse_python_call_lenient(trimmed) {
+        return Some(call);
+    }
 
     // Plain `<Verb> <arg>` prose. Pick the first line and parse it.
     let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
@@ -454,6 +517,146 @@ fn parse_gemma_tool_code(body: &str) -> Option<RawToolCall> {
         return Some(build_prose_call(&cap, ""));
     }
     None
+}
+
+/// Permissive recovery: tolerates missing `)` and unterminated string
+/// literals. Walks `Func(` then for each `key=` slurps a value either as
+/// a quoted string (with whatever close it can find — `"` or end-of-input)
+/// or as a bare token up to the next `,` outside strings.
+fn parse_python_call_lenient(s: &str) -> Option<RawToolCall> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let name_start = i;
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        i += 1;
+    }
+    let name = std::str::from_utf8(&bytes[name_start..i]).ok()?.to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let cap = capitalize(&name);
+    if !TOOL_VERBS.contains(&cap.as_str()) {
+        return None;
+    }
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'(' {
+        return None;
+    }
+    i += 1; // consume `(`
+
+    let mut args = serde_json::Map::new();
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b')' {
+            break;
+        }
+        // Parse `key`.
+        let key_start = i;
+        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+            i += 1;
+        }
+        let key = std::str::from_utf8(&bytes[key_start..i]).ok()?.to_string();
+        if key.is_empty() {
+            i += 1;
+            continue;
+        }
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            // No `=` — skip until next comma or `)`.
+            while i < bytes.len() && bytes[i] != b',' && bytes[i] != b')' {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1; // consume `=`
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        // Read value.
+        let value = if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+            let quote = bytes[i];
+            i += 1;
+            let val_start = i;
+            let mut esc = false;
+            let mut closed = false;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if esc {
+                    esc = false;
+                    i += 1;
+                    continue;
+                }
+                if b == b'\\' {
+                    esc = true;
+                    i += 1;
+                    continue;
+                }
+                if b == quote {
+                    closed = true;
+                    break;
+                }
+                i += 1;
+            }
+            let val_end = i;
+            if closed {
+                i += 1; // consume closing quote
+            }
+            unquote_inner(&bytes[val_start..val_end])
+        } else {
+            let val_start = i;
+            while i < bytes.len() && bytes[i] != b',' && bytes[i] != b')' {
+                i += 1;
+            }
+            std::str::from_utf8(&bytes[val_start..i])
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        args.insert(key, serde_json::Value::String(value));
+    }
+    if args.is_empty() {
+        return None;
+    }
+    Some(RawToolCall {
+        id: ToolCallId::new(),
+        name: cap,
+        args: serde_json::Value::Object(args),
+    })
+}
+
+fn unquote_inner(bytes: &[u8]) -> String {
+    let s = std::str::from_utf8(bytes).unwrap_or("");
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('"') => out.push('"'),
+                Some('\'') => out.push('\''),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => break,
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn parse_python_call(s: &str) -> Option<RawToolCall> {
@@ -1090,5 +1293,60 @@ mod tests {
         let s = "Here is some commentary about the topic.\n```python\nprint('x')\n```";
         let p = parse(s);
         assert!(p.tool_calls.is_empty(), "got: {:?}", p);
+    }
+
+    /// Captured from Gemma 3n E2B (trace 2026-05-15 class-plan v3, write-homework).
+    /// The content argument itself contained ``` which previously truncated
+    /// the body and made the call unparseable.
+    #[test]
+    fn gemma_quirk_tool_code_with_backticks_inside_content() {
+        let raw = concat!(
+            "```tool_code\n",
+            "Write(path=\"homework.md\", content=\"# Homework\\n\\n",
+            "## Practice problems\\n1. one\\n2. two\\n\\n```\")\n",
+            "```",
+        );
+        let p = parse(raw);
+        assert_eq!(p.tool_calls.len(), 1, "got: {:?}", p);
+        let c = &p.tool_calls[0];
+        assert_eq!(c.call.name, "Write");
+        assert_eq!(c.call.args["path"], "homework.md");
+        let content = c.call.args["content"].as_str().unwrap();
+        assert!(content.contains("# Homework"));
+        assert!(content.contains("## Practice problems"));
+        assert!(content.contains("```"), "trailing backticks preserved");
+    }
+
+    /// Captured live from Gemma 3n E2B (class-plan v4): the model emits a
+    /// `Write(..., content="...```...` call where the content string is
+    /// UNTERMINATED — no closing `"` and no `)`. The string-aware close
+    /// fails, plain close still picks up the trailing ``` , and the lenient
+    /// kwarg parser must recover the call.
+    #[test]
+    fn gemma_quirk_tool_code_unterminated_content_recovered() {
+        let raw = concat!(
+            "```tool_code\n",
+            "Write(path=\"homework.md\", content=\"# Homework\\n\\n",
+            "## Practice problems\\n1. one\\n\\n```\n",
+            "```",
+        );
+        let p = parse(raw);
+        assert_eq!(p.tool_calls.len(), 1, "got: {:?}", p);
+        let c = &p.tool_calls[0];
+        assert_eq!(c.call.name, "Write");
+        assert_eq!(c.call.args["path"], "homework.md");
+        let content = c.call.args["content"].as_str().unwrap();
+        assert!(content.starts_with("# Homework"), "got: {content:?}");
+        assert!(content.contains("Practice problems"));
+    }
+
+    #[test]
+    fn fenced_json_still_closes_on_first_triple_backtick() {
+        // Non tool_code langs use the simple close strategy — confirm that's
+        // unchanged so existing markdown/JSON behavior holds.
+        let s = "```json\n{\"name\":\"Read\",\"args\":{\"path\":\"x.md\"}}\n```\nextra";
+        let p = parse(s);
+        assert_eq!(p.tool_calls.len(), 1);
+        assert_eq!(p.text, "extra");
     }
 }
