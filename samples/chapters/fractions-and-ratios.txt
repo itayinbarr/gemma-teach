@@ -1,0 +1,11 @@
+Chapter 5 — Fractions and Ratios
+
+A fraction is a way of describing a part of a whole. The number on top of the line is the numerator; it tells you how many parts you have. The number underneath is the denominator; it tells you the total number of equal parts in the whole. The fraction 3/4 means three out of four equal parts. The fraction 1/2 means one out of two equal parts — the same amount as 2/4 or 4/8. Fractions that name the same amount are called equivalent fractions.
+
+A ratio compares two quantities. We write the ratio of A to B as A:B or as the fraction A/B. If a basket has 6 apples and 2 oranges, the ratio of apples to oranges is 6:2, which simplifies to 3:1. Ratios and fractions are closely related, but a ratio compares two separate quantities while a fraction names a part of one whole. Both can be simplified by dividing the top and bottom by the same number. The ratio 6:2 simplifies to 3:1 by dividing both by 2; the fraction 6/8 simplifies to 3/4 by the same rule.
+
+To compare two fractions with different denominators we rewrite them with the same denominator. For example, 2/3 and 3/4 become 8/12 and 9/12 — so 3/4 is larger by 1/12. To add or subtract fractions we need the same denominator first; then we add or subtract the numerators and keep the denominator. To multiply two fractions we multiply the numerators and multiply the denominators: 2/3 × 3/4 = 6/12 = 1/2. To divide a fraction by another fraction, we multiply by its reciprocal: 2/3 ÷ 3/4 = 2/3 × 4/3 = 8/9.
+
+A common misconception is that adding fractions means adding the numerators and the denominators separately — 1/2 + 1/3 = 2/5 is wrong; the correct answer is 5/6. Another misconception is that a bigger denominator always means a bigger fraction; in fact, with the same numerator, a bigger denominator means a smaller share. 1/8 is smaller than 1/2 because the whole has been split into more, smaller parts.
+
+Percentages are a special kind of ratio where the denominator is 100. 75% means 75 out of 100, or 3/4. To convert a fraction to a percentage, rewrite it with denominator 100 (or divide and multiply by 100): 3/4 = 75/100 = 75%. Ratios, fractions, and percentages are three views of the same idea — the relationship between a part and a whole.

@@ -4,7 +4,7 @@ A Claude Code–style harness for teachers, powered by Gemma 3n E2B, running ful
 
 Gemma Teach is to the classroom what Claude Code is to the terminal: a slash-command interface that turns a language model into a useful collaborator on a fixed pipeline of bounded, validated tasks. Teachers add students, plan lessons, and produce personalized homework without anything leaving the laptop. macOS today, iPhone next.
 
-See `docs/whitepaper.md` for the architecture write-up and `samples/showcase/photosynthesis-diego/` for an end-to-end run.
+See `docs/whitepaper.md` for the architecture write-up and `samples/showcase/fractions-diego/` for an end-to-end run.
 
 ## Why this exists
 
@@ -50,7 +50,7 @@ Notebook lives at `~/GemmaTeach/`. Model cache at `~/.gemma-teach/models/`. Logs
 
 ## Showcase
 
-`samples/showcase/photosynthesis-diego/` contains a complete run against the real Gemma 3n model: a public-domain photosynthesis chapter, a 9th-grade student profile for "Diego" (trains + dinosaurs), the master class-notes PDF and master homework PDF that apply to the whole class, the tailoring plan the system picked for Diego specifically (locomotive class names, the Mark Felton YouTube channel, the DK Smithsonian dinosaur encyclopedia), and Diego's personalized homework PDF where every one of the five problems is rewritten around one of those anchors. Files are numbered in the order the pipeline produced them.
+`samples/showcase/fractions-diego/` contains a complete end-to-end run against the real Gemma 3n model: a math chapter on fractions and ratios, a 6th-grade Barcelona-FC obsessed student profile for "Diego," the master class-notes PDF and master homework PDF that apply to the whole class, the tailoring plan the system picks for Diego specifically (Barcelona match scores, Dragon Ball Z power levels), and Diego's personalized homework PDF where the math problems are reformulated so the named-interest scenarios supply the numerical operands — *"Barcelona scored 2 goals out of 3 shots in the first half. What is the fraction of goals scored compared to the number of shots taken?"* in place of *"Find an equivalent fraction for 2/3."* Files are numbered in the order the pipeline produced them.
 
 ## Testing
 

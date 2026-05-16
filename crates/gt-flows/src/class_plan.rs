@@ -112,6 +112,10 @@ pub fn build_flow(
             .in_group("tailor"),
         );
         steps.push(StepNode::det(
+            format!("restore-hw-suffixes-{slug}"),
+            RestoreHomeworkSuffixes { slug: slug.clone() },
+        ));
+        steps.push(StepNode::det(
             format!("validate-tailored-hw-{slug}"),
             ValidateHomeworkMapping {
                 path: STUDENT_HW_FILENAME.into(),
@@ -443,27 +447,56 @@ impl AgentStepFactory for PlanTailoring {
                 t.strip_prefix("### ").map(|c| c.trim().to_string())
             })
             .collect();
-        let problem_count = master_hw
-            .lines()
-            .filter(|l| {
-                let mut chars = l.trim_start().chars();
-                let a = chars.next();
-                let b = chars.next();
-                matches!((a, b), (Some(d), Some(c)) if d.is_ascii_digit() && (c == '.' || c == ')'))
-            })
-            .count();
+        // Pull each master problem's `n. body (maps to: …)` so the planner
+        // can craft a scenario whose operand shape matches the operation
+        // that specific problem expects.
+        let mut master_problem_lines: Vec<(u32, String)> = Vec::new();
+        for line in master_hw.lines() {
+            let t = line.trim_start();
+            let mut chars = t.chars();
+            let a = chars.next();
+            let b = chars.next();
+            let n_str = match (a, b) {
+                (Some(x), Some(y)) if x.is_ascii_digit() && (y == '.' || y == ')') => {
+                    Some(x.to_string())
+                }
+                (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                    if matches!(chars.next(), Some('.') | Some(')')) {
+                        Some(format!("{x}{y}"))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(n_str) = n_str {
+                if let Ok(n) = n_str.parse::<u32>() {
+                    master_problem_lines.push((n, t.to_string()));
+                }
+            }
+        }
+        let problem_count = master_problem_lines.len();
 
         // Markdown template — no nested escaping. Each row is plain text with
         // `key: value` pairs the validator parses with regex.
         let concept_template = concepts
             .iter()
-            .map(|c| format!("- concept: {c}\n  interest: <one of the student's tags>\n  named_element: <a specific element from inside that interest — a character, a place, a mechanic, a song, a technique>"))
+            .map(|c| format!("- concept: {c}\n  interest: <one of the student's tags>\n  named_element: <a specific element from inside that interest>\n  scenario: <a one-line concrete situation from inside that interest that this concept operates on; include real numbers or named entities where possible>"))
             .collect::<Vec<_>>()
             .join("\n");
-        let problem_template = (1..=problem_count.max(1))
-            .map(|i| format!("- n: {i}\n  interest: <one of the student's tags>\n  named_element: <a specific element from inside that interest>"))
+        // Per-problem template entries quote the master problem so the
+        // planner can match the scenario's operands to what the operation
+        // expects.
+        let problem_template = master_problem_lines
+            .iter()
+            .map(|(n, body)| {
+                format!(
+                    "- n: {n}\n  # master problem to mirror: {body}\n  interest: <one of the student's tags>\n  named_element: <a specific element from inside that interest>\n  scenario: <a one-line concrete situation from that interest whose numbers / entities can serve as the operands of the master problem's operation>"
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
+        let _ = problem_count;
 
         let task = format!(
             r#"Pick specific tailoring anchors for this student. Write `{TAILORING_PLAN_FILENAME}` with EXACTLY this shape (plain markdown, no JSON, no code fences inside the file):
@@ -477,6 +510,7 @@ impl AgentStepFactory for PlanTailoring {
 ## Worked example
 - interest: <one of the student's tags>
 - named_element: <a specific element from inside that interest>
+- scenario: <a one-line concrete situation from inside that interest that the worked example can operate on; include real numbers or named entities>
 
 ## Problems
 {problem_template}
@@ -484,9 +518,13 @@ impl AgentStepFactory for PlanTailoring {
 
 Rules:
   • `interest:` is one of the kebab-case tags from `tags.json` below.
-  • `named_element:` is a SPECIFIC, real thing from inside that interest — a character, a place, a mechanic, a song, a player, a technique. Not the interest's title. Not a generic category word. If you don't know specific elements for a tag, pick a different tag where you do.
-  • Pick DIFFERENT interests across the concepts when possible — variety beats repetition.
-  • Match anchors to what the concept is about, not just to what's catchy.
+  • `named_element:` is a SPECIFIC element from inside that interest — a character, a place, a mechanic, a song, a player, a technique.
+  • `scenario:` is the load-bearing field — it must be a CONCRETE micro-situation from that interest that THE PROBLEM'S OPERATION CAN ACT ON. The downstream step uses the scenario's operands (numbers, named entities, quantities) as the operands of the rewritten problem. Examples of the shape we want:
+      – For a fractions problem with anchor 'Barcelona FC': "Barcelona scored 3 goals out of 8 shots in the first half" — gives the substituter `3` and `8` to use as numerator/denominator.
+      – For a ratios problem with anchor 'Dragon Ball Z': "Goku has a power level of 9,000 while Vegeta has 18,000" — gives the substituter the two quantities for a ratio.
+      – For a non-math concept (a process or definition) with anchor 'Minecraft': "a redstone circuit with 4 pressure plates wired in series" — gives the substituter a named mechanism.
+    AVOID generic scenarios like "Goku is fighting" or "Barcelona is playing" — they have no operands.
+  • Pick DIFFERENT interests across the concepts when possible.
   • Keep every `concept:` label and every `n:` number from the template above. Replace every `<…>` placeholder with real content.
 
 --- student.md ---
@@ -601,12 +639,14 @@ pub struct TailoringConceptEntry {
     pub concept: String,
     pub interest: String,
     pub named_element: String,
+    pub scenario: String,
 }
 
 #[derive(Debug, Default)]
 pub struct TailoringAnchor {
     pub interest: String,
     pub named_element: String,
+    pub scenario: String,
 }
 
 #[derive(Debug, Default)]
@@ -614,6 +654,7 @@ pub struct TailoringProblemEntry {
     pub n: u32,
     pub interest: String,
     pub named_element: String,
+    pub scenario: String,
 }
 
 /// Parse the markdown plan format:
@@ -698,6 +739,10 @@ pub fn parse_tailoring_plan(s: &str) -> Result<TailoringPlan, String> {
                     if let Some(c) = cur_concept.as_mut() {
                         c.named_element = v;
                     }
+                } else if let Some(v) = take_value(line, "scenario") {
+                    if let Some(c) = cur_concept.as_mut() {
+                        c.scenario = v;
+                    }
                 }
             }
             Section::WorkedExample => {
@@ -705,6 +750,8 @@ pub fn parse_tailoring_plan(s: &str) -> Result<TailoringPlan, String> {
                     plan.worked_example.interest = v;
                 } else if let Some(v) = take_value(line, "named_element") {
                     plan.worked_example.named_element = v;
+                } else if let Some(v) = take_value(line, "scenario") {
+                    plan.worked_example.scenario = v;
                 }
             }
             Section::Problems => {
@@ -722,6 +769,10 @@ pub fn parse_tailoring_plan(s: &str) -> Result<TailoringPlan, String> {
                 } else if let Some(v) = take_value(line, "named_element") {
                     if let Some(p) = cur_problem.as_mut() {
                         p.named_element = v;
+                    }
+                } else if let Some(v) = take_value(line, "scenario") {
+                    if let Some(p) = cur_problem.as_mut() {
+                        p.scenario = v;
                     }
                 }
             }
@@ -769,35 +820,102 @@ impl AgentStepFactory for TailorHomeworkForStudent {
             std::fs::read_to_string(dir.join(TAILORING_PLAN_FILENAME)).unwrap_or_default();
         let plan = parse_tailoring_plan(&plan_text).unwrap_or_default();
 
-        // Inline-expand the per-problem anchors so the model sees explicit
-        // per-line substitution instructions, not a JSON-style plan to
-        // interpret.
-        let mut substitutions = String::new();
-        for p in &plan.problems {
-            if p.n == 0 || p.named_element.is_empty() {
-                continue;
-            }
-            substitutions.push_str(&format!(
-                "  • Problem {}: rewrite the problem statement so its scenario is **{}** ({}). Style: \"In {}, <problem setup that exercises the same concept as the master's problem {}>.\" Keep the master's ` (maps to: …)` suffix verbatim.\n",
-                p.n, p.named_element, p.interest, p.named_element, p.n
-            ));
+        // Build a deterministic FILL-IN-THE-BLANK template. Each numbered
+        // problem becomes a placeholder line: the master problem's text is
+        // shown to the model in a small `(master operation: …)` annotation so
+        // it knows which OPERATION to apply, then a one-line task tells the
+        // model exactly how to fill in the slot using the scenario's
+        // operands. There is NO master homework to fall back to — only
+        // blanks the model must fill — which is the only reliable way to
+        // stop Gemma 3n from defaulting to verbatim copies.
+        let mut master_problems: Vec<(u32, String, String)> = Vec::new();
+        for line in master_hw.lines() {
+            let t = line.trim_start();
+            // Match "1. ..." or "1) ..." with the (maps to: X) suffix.
+            let mut chars = t.chars();
+            let d1 = chars.next();
+            let d2 = chars.next();
+            let n_raw = match (d1, d2) {
+                (Some(a), Some(b)) if a.is_ascii_digit() && (b == '.' || b == ')') => {
+                    Some(a.to_string())
+                }
+                (Some(a), Some(b)) if a.is_ascii_digit() && b.is_ascii_digit() => {
+                    let rest = chars.next();
+                    if matches!(rest, Some('.') | Some(')')) {
+                        Some(format!("{a}{b}"))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            let Some(n_str) = n_raw else { continue };
+            let n: u32 = n_str.parse().unwrap_or(0);
+            // Split body from `(maps to: X)` suffix.
+            let suffix_idx = match t.rfind("(maps to:") {
+                Some(i) => i,
+                None => continue,
+            };
+            // Skip past the number prefix to get the body.
+            let after_n = &t[n_str.len()..];
+            let after_n = after_n.trim_start_matches([')', '.']).trim_start();
+            let body_end = after_n.rfind("(maps to:").unwrap_or(after_n.len());
+            let body = after_n[..body_end].trim().to_string();
+            let suffix = t[suffix_idx..].to_string();
+            master_problems.push((n, body, suffix));
         }
 
+        // Pull the title from the master's first `# …` line so this works
+        // for any topic, not just fractions.
+        let master_title = master_hw
+            .lines()
+            .find(|l| l.trim_start().starts_with("# "))
+            .map(|l| l.trim().to_string())
+            .unwrap_or_else(|| "# Homework".into());
+        let mut filled_template = String::new();
+        filled_template.push_str(&format!("{master_title}\n\n## Practice problems\n"));
+        for (n, body, suffix) in &master_problems {
+            let plan_entry = plan.problems.iter().find(|p| p.n == *n);
+            let scenario = plan_entry
+                .map(|p| {
+                    if p.scenario.is_empty() {
+                        p.named_element.clone()
+                    } else {
+                        p.scenario.clone()
+                    }
+                })
+                .unwrap_or_default();
+            let interest = plan_entry.map(|p| p.interest.clone()).unwrap_or_default();
+            if scenario.is_empty() {
+                filled_template.push_str(&format!("{n}. {body} {suffix}\n"));
+            } else {
+                filled_template.push_str(&format!(
+                    "{n}. <one or two sentences. The OPERATION the original problem asked for: \"{body}\". The SCENARIO you must use (from {interest}): \"{scenario}\". Use the scenario's concrete numbers or named entities as the operands the operation acts on. Do NOT use the original problem's numbers; use the scenario's.> {suffix}\n"
+                ));
+            }
+        }
+        // Append the trailing sections from the master so the model only
+        // worries about the numbered problems.
+        let mut tail = String::new();
+        let mut in_problems = false;
+        for line in master_hw.lines() {
+            if line.trim().starts_with("## Reflection") || line.trim().starts_with("## Suggested") {
+                in_problems = true;
+            }
+            if in_problems {
+                tail.push_str(line);
+                tail.push('\n');
+            }
+        }
+        filled_template.push('\n');
+        filled_template.push_str(&tail);
+
         let task = format!(
-            r#"Write `{STUDENT_HW_FILENAME}`. Start from the master homework (below). Apply the following EXPLICIT per-problem substitutions — these are the only changes. The `(maps to: …)` suffix on each problem stays verbatim.
+            r#"Write `{STUDENT_HW_FILENAME}`. The file content is below as a TEMPLATE with `<…>` slots on every numbered problem. Your job is to replace every `<…>` slot with a single concrete 1–2 sentence problem that does exactly what the slot describes — use the scenario's numbers / entities as the operands of the named operation. Leave everything outside the `<…>` slots unchanged.
 
-Substitutions to apply:
-{substitutions}
-
-Keep unchanged:
-  • The title.
-  • The `## Reflection prompt` and `## Suggested time` sections (you may lightly re-skin the reflection prompt to mention the worked example's anchor).
-  • The number of problems.
-  • Every `(maps to: <Concept>)` suffix verbatim.
-
---- homework.md (the master — apply the substitutions above) ---
-{master_hw}
---- end of homework.md ---
+--- template ---
+{filled_template}
+--- end of template ---
 
 After Write succeeds, reply: Done."#
         );
@@ -812,6 +930,137 @@ After Write succeeds, reply: Done."#
             format!("tailored_hw_{}", self.slug),
             PathBuf::from(STUDENT_HW_FILENAME),
         )]
+    }
+}
+
+// ----- restore-hw-suffixes-<slug> (deterministic) ---------------------------
+//
+// Gemma 3n reliably drops the ` (maps to: <Concept>)` suffix from numbered
+// problems even when the prompt told it to preserve them — it treats the
+// suffix as decoration when it's busy rewriting the problem body. Rather
+// than flood the prompt with reminders, we restore the suffix here
+// deterministically from the master homework's suffix-by-n map. If the
+// tailored file already has a valid suffix on a line, we leave it alone;
+// if it's missing, we append the master's suffix for that problem number.
+
+struct RestoreHomeworkSuffixes {
+    slug: String,
+}
+
+#[async_trait]
+impl DeterministicStep for RestoreHomeworkSuffixes {
+    async fn run(&self, ctx: &FlowCtx) -> Result<StepOutcome, FlowError> {
+        let step = format!("restore-hw-suffixes-{}", self.slug);
+        let lesson = lesson_dir(ctx);
+        let master_path = lesson.join(HOMEWORK_FILENAME);
+        let tailored_path = lesson
+            .join("per-student")
+            .join(&self.slug)
+            .join(STUDENT_HW_FILENAME);
+
+        let master = match tokio::fs::read_to_string(&master_path).await {
+            Ok(s) => s,
+            Err(_) => return Ok(StepOutcome::default()),
+        };
+        let tailored = match tokio::fs::read_to_string(&tailored_path).await {
+            Ok(s) => s,
+            Err(_) => return Ok(StepOutcome::default()),
+        };
+
+        // Build a `<n> → "(maps to: X)"` map from the master.
+        let mut suffix_by_n: std::collections::HashMap<u32, String> = Default::default();
+        for line in master.lines() {
+            let t = line.trim_start();
+            let mut chars = t.chars();
+            let d1 = chars.next();
+            let d2 = chars.next();
+            let n_str = match (d1, d2) {
+                (Some(a), Some(b)) if a.is_ascii_digit() && (b == '.' || b == ')') => {
+                    Some(a.to_string())
+                }
+                (Some(a), Some(b)) if a.is_ascii_digit() && b.is_ascii_digit() => {
+                    if matches!(chars.next(), Some('.') | Some(')')) {
+                        Some(format!("{a}{b}"))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            let Some(n_str) = n_str else { continue };
+            let n: u32 = match n_str.parse() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(idx) = t.rfind("(maps to:") {
+                if t[idx..].ends_with(')') {
+                    suffix_by_n.insert(n, t[idx..].to_string());
+                }
+            }
+        }
+        if suffix_by_n.is_empty() {
+            return Ok(StepOutcome::default());
+        }
+
+        // Walk the tailored file; for any numbered line that already has a
+        // valid suffix leave it alone, otherwise append the master's.
+        let mut out = String::with_capacity(tailored.len() + 256);
+        let mut patched: u32 = 0;
+        for line in tailored.lines() {
+            let t = line.trim_end();
+            let trimmed = t.trim_start();
+            let mut chars = trimmed.chars();
+            let d1 = chars.next();
+            let d2 = chars.next();
+            let n_str = match (d1, d2) {
+                (Some(a), Some(b)) if a.is_ascii_digit() && (b == '.' || b == ')') => {
+                    Some(a.to_string())
+                }
+                (Some(a), Some(b)) if a.is_ascii_digit() && b.is_ascii_digit() => {
+                    if matches!(chars.next(), Some('.') | Some(')')) {
+                        Some(format!("{a}{b}"))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            let n: Option<u32> = n_str.as_ref().and_then(|s| s.parse().ok());
+            let has_suffix = trimmed
+                .rfind("(maps to:")
+                .map(|i| trimmed[i..].ends_with(')'))
+                .unwrap_or(false);
+            match (n, has_suffix) {
+                (Some(n), false) => match suffix_by_n.get(&n) {
+                    Some(suffix) => {
+                        out.push_str(t);
+                        if !t.ends_with(' ') {
+                            out.push(' ');
+                        }
+                        out.push_str(suffix);
+                        out.push('\n');
+                        patched += 1;
+                    }
+                    None => {
+                        out.push_str(t);
+                        out.push('\n');
+                    }
+                },
+                _ => {
+                    out.push_str(t);
+                    out.push('\n');
+                }
+            }
+        }
+        if patched > 0 {
+            tokio::fs::write(&tailored_path, out.as_bytes())
+                .await
+                .map_err(|e| FlowError::Step {
+                    step,
+                    msg: format!("write {}: {e}", tailored_path.display()),
+                })?;
+        }
+        Ok(StepOutcome::default())
     }
 }
 
