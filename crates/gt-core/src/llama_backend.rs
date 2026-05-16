@@ -27,6 +27,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell};
 
+/// Install the llama.cpp → tracing log bridge exactly once. Without this,
+/// llama.cpp writes loader / Metal / context messages directly to stderr,
+/// which (under a ratatui alternate-screen TUI) corrupts the rendered
+/// layout. With it, the same messages flow through `tracing` and land in
+/// whatever sink the binary configured (a log file, in our case).
+static LOG_BRIDGE: std::sync::Once = std::sync::Once::new();
+fn ensure_log_bridge() {
+    LOG_BRIDGE.call_once(|| {
+        llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default());
+    });
+}
+
 use crate::backend::{
     BackendError, GenerateRequest, LlmBackend, StopReason, TokenEvent, Usage,
 };
@@ -84,6 +96,7 @@ impl LlamaCppBackend {
             if !cfg.model_path.exists() {
                 return Err(BackendError::ModelNotFound(cfg.model_path.display().to_string()));
             }
+            ensure_log_bridge();
             let backend = LlamaBackend::init().map_err(|e| BackendError::Io(e.to_string()))?;
             let model_params = LlamaModelParams::default().with_n_gpu_layers(cfg.n_gpu_layers);
             let model = LlamaModel::load_from_file(&backend, &cfg.model_path, &model_params)

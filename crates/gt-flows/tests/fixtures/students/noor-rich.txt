@@ -1,0 +1,32 @@
+Name: Noor
+Age & grade: 11, 6th grade.
+
+Interests & passions:
+Robotics club lead — she's currently programming a line-follower with an
+Arduino Uno and three IR sensors. Built her own claw arm out of laser-cut MDF
+and standard hobby servos. Comfortable wiring a breadboard but still mixes up
+analog and digital pins occasionally. Competes in regional badminton (under-12
+singles, ranked 4th in her division). Her parents are both mechanical
+engineers who emigrated from Pakistan; they push hard on math and expect her
+to "skip a year" by 8th grade. She is the family's first English speaker —
+Urdu at home — and translates for her grandmother weekly.
+
+Hobbies & media:
+- Tinkers with Arduino kits — favorite project is a temperature logger that
+  texts her dad when the basement gets too cold.
+- Badminton training Tuesdays and Thursdays; tournaments most weekends.
+- Watches "How To Mechatronics" YouTube tutorials; rewatches "The Karate Kid".
+- Plays Roblox with her cousins in Lahore over video call.
+
+Learning style & teacher notes:
+ELL learner — her receptive English is excellent but she sometimes
+substitutes a wrong technical term mid-sentence ("electron" for "neutron",
+"velocity" for "acceleration") and gets visibly frustrated. Build a short
+vocab list at the start of each unit and let her pre-read terms before the
+lesson. She over-applies what she's just learned — give a hammer, she'll
+treat the next three problems as nails. Counter this by pairing each
+worked example with a "doesn't apply because…" non-example. She is
+performance-anxious because of her parents' expectations; praise her
+*method* on a problem she got wrong, not just her correct answers. Her
+robotics fluency is a goldmine for hardware analogies — a state machine
+maps cleanly onto her line-follower behavior tree.

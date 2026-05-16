@@ -17,15 +17,21 @@ use std::time::{Duration, Instant};
 
 use crate::app::{App, AppMode, ClassPlanField, ClassPlanForm, FormField, StudentAddForm, StudentEditForm};
 use gt_flows::class_plan::ClassPlanSource;
+use crate::log::StderrRedirect;
 use crate::slash::{parse, Slash};
 use crate::theme;
 
-pub async fn run(mut app: App) -> Result<()> {
+pub async fn run(mut app: App, log_path: std::path::PathBuf) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     stdout.execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(backend)?;
+
+    // Redirect stderr fd → log file for the lifetime of the TUI. Catches both
+    // tracing output (already routed to stderr) and any direct C-side writes
+    // from llama.cpp / ggml-metal that bypass the tracing callback.
+    let _stderr_redirect = StderrRedirect::to_file(&log_path).ok();
 
     let tick = Duration::from_millis(33);
     let mut last_tick = Instant::now();
@@ -44,7 +50,12 @@ pub async fn run(mut app: App) -> Result<()> {
         if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(k) => handle_key(&mut app, k),
-                Event::Resize(_, _) => {}
+                Event::Resize(_, _) => {
+                    // Force a full clear so any stray bytes that slipped onto
+                    // the alternate screen before the redirect armed (or any
+                    // future leak we haven't caught yet) get scrubbed.
+                    term.clear().ok();
+                }
                 _ => {}
             }
         }
@@ -182,51 +193,42 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Esc => {
                 app.mode = AppMode::Idle;
             }
-            KeyCode::Tab => {
-                form.focus = match form.focus {
-                    FormField::Name => FormField::Description,
-                    FormField::Description => FormField::Name,
-                };
-            }
-            // In Description, Shift-Enter inserts a newline so multiline notes still work.
+            KeyCode::Tab => form.focus = form.focus.next(),
+            KeyCode::BackTab => form.focus = form.focus.prev(),
+            // In multiline fields, Shift-Enter inserts a newline.
             KeyCode::Enter
-                if matches!(form.focus, FormField::Description)
+                if form.focus.is_multiline()
                     && k.modifiers.contains(KeyModifiers::SHIFT) =>
             {
-                form.description.push('\n');
+                field_mut(form, form.focus).push('\n');
             }
-            // Plain Enter on the Name field advances to Description.
-            // Plain Enter on Description submits the form.
-            KeyCode::Enter => match form.focus {
-                FormField::Name => {
-                    if form.name.trim().is_empty() {
+            // Plain Enter advances to the next field, except on the last
+            // field (LearningNotes) where it submits.
+            KeyCode::Enter => {
+                if form.focus == FormField::LearningNotes {
+                    let name = form.name.trim().to_string();
+                    if name.is_empty() {
                         app.log("Name is required.");
                         return;
                     }
-                    form.focus = FormField::Description;
-                }
-                FormField::Description => {
-                    let name = form.name.trim().to_string();
-                    let description = form.description.trim().to_string();
-                    if name.is_empty() || description.is_empty() {
-                        app.log("Both Name and Description are required.");
+                    let description = form.compose_description();
+                    if description.is_empty() {
+                        app.log("Fill at least one descriptive field (interests, hobbies, or notes).");
                         return;
                     }
                     app.start_student_add(name, description);
+                } else {
+                    if form.focus == FormField::Name && form.name.trim().is_empty() {
+                        app.log("Name is required.");
+                        return;
+                    }
+                    form.focus = form.focus.next();
                 }
-            },
-            KeyCode::Backspace => match form.focus {
-                FormField::Name => {
-                    form.name.pop();
-                }
-                FormField::Description => {
-                    form.description.pop();
-                }
-            },
-            KeyCode::Char(c) => match form.focus {
-                FormField::Name => form.name.push(c),
-                FormField::Description => form.description.push(c),
-            },
+            }
+            KeyCode::Backspace => {
+                field_mut(form, form.focus).pop();
+            }
+            KeyCode::Char(c) => field_mut(form, form.focus).push(c),
             _ => {}
         },
     }
@@ -603,56 +605,84 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(line).block(block), area);
 }
 
+fn field_mut(form: &mut StudentAddForm, which: FormField) -> &mut String {
+    match which {
+        FormField::Name => &mut form.name,
+        FormField::AgeGrade => &mut form.age_grade,
+        FormField::Interests => &mut form.interests,
+        FormField::HobbiesMedia => &mut form.hobbies_media,
+        FormField::LearningNotes => &mut form.learning_notes,
+    }
+}
+
 fn draw_modal(f: &mut ratatui::Frame, area: Rect, form: &StudentAddForm) {
-    let centered = centered_rect(75, 80, area);
+    let centered = centered_rect(80, 90, area);
     f.render_widget(ratatui::widgets::Clear, centered);
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // name field
-            Constraint::Min(5),    // description
+            Constraint::Length(3), // name
+            Constraint::Length(3), // age & grade
+            Constraint::Min(4),    // interests
+            Constraint::Min(4),    // hobbies & media
+            Constraint::Min(4),    // learning notes
             Constraint::Length(2), // hint
         ])
         .split(centered);
 
-    let name_focused = matches!(form.focus, FormField::Name);
-    let desc_focused = matches!(form.focus, FormField::Description);
+    let mut mk = |title: &str, val: &str, focused: bool, layout_idx: usize| {
+        let block = Block::default()
+            .title(format!(" {title} "))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(if focused { theme::ACCENT } else { theme::MUTED }));
+        let p = Paragraph::new(val).block(block).wrap(Wrap { trim: false });
+        f.render_widget(p, layout[layout_idx]);
+    };
 
-    let name_block = Block::default()
-        .title(" /student-add — Name ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(if name_focused {
-            theme::ACCENT
-        } else {
-            theme::MUTED
-        }));
-    let name_p = Paragraph::new(form.name.as_str()).block(name_block);
-    f.render_widget(name_p, layout[0]);
-
-    let desc_block = Block::default()
-        .title(" Description (free-text — interests, hobbies, favorite media) ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(if desc_focused {
-            theme::ACCENT
-        } else {
-            theme::MUTED
-        }));
-    let desc_p = Paragraph::new(form.description.as_str())
-        .block(desc_block)
-        .wrap(Wrap { trim: false });
-    f.render_widget(desc_p, layout[1]);
+    mk(
+        "/student-add — Name",
+        form.name.as_str(),
+        form.focus == FormField::Name,
+        0,
+    );
+    mk(
+        "Age & grade (e.g. 12, 7th grade)",
+        form.age_grade.as_str(),
+        form.focus == FormField::AgeGrade,
+        1,
+    );
+    mk(
+        "Interests & passions — what they geek out about",
+        form.interests.as_str(),
+        form.focus == FormField::Interests,
+        2,
+    );
+    mk(
+        "Hobbies & media — shows, games, books, music, sports",
+        form.hobbies_media.as_str(),
+        form.focus == FormField::HobbiesMedia,
+        3,
+    );
+    mk(
+        "Learning style & teacher notes — how they learn, what works, what doesn't",
+        form.learning_notes.as_str(),
+        form.focus == FormField::LearningNotes,
+        4,
+    );
 
     let hint = Paragraph::new(Line::from(vec![
         Span::styled("Tab", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::raw("/"),
+        Span::styled("Shift-Tab", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
         Span::raw(" switch field    "),
         Span::styled("Enter", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-        Span::raw(" next / submit    "),
+        Span::raw(" next / submit (on last)    "),
         Span::styled("Shift-Enter", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
         Span::raw(" newline    "),
         Span::styled("Esc", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
         Span::raw(" cancel"),
     ]));
-    f.render_widget(hint, layout[2]);
+    f.render_widget(hint, layout[5]);
 }
 
 fn draw_help_modal(f: &mut ratatui::Frame, area: Rect) {

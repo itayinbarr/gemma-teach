@@ -31,23 +31,25 @@ async fn class_plan_end_to_end_with_mocks() {
 
     let backend = Arc::new(MockBackend::new());
     let class_notes_body = "# Photosynthesis\n## Learning objectives\n- Identify chloroplasts.\n## Key concepts\n### Light reaction\n- bullet\n## Worked example\n- One.\n## Common misconceptions\n- Plants don't 'eat' soil.\n";
-    let homework_body = "# Homework — Photosynthesis\n## Practice problems\n1. one\n2. two\n3. three\n4. four\n5. five\n## Reflection prompt\nWhy?\n## Suggested time\n30 minutes\n";
+    // Master homework must include the `(maps to: <Concept>)` suffix on every
+    // numbered problem — enforced by the new validate-homework-mapping step.
+    let homework_body = "# Homework — Photosynthesis\n## Practice problems\n1. one (maps to: Light reaction)\n2. two (maps to: Light reaction)\n3. three (maps to: Light reaction)\n4. four (maps to: Light reaction)\n5. five (maps to: Light reaction)\n## Reflection prompt\nWhy?\n## Suggested time\n30 minutes\n";
 
     // Flow steps that exercise the backend (in order):
-    //   write-class-notes    (one-shot Write)
-    //   write-homework       (one-shot Write)
-    //   tailor-notes-for-maya  (one-shot Write notes.md)
-    //   tailor-hw-for-maya     (one-shot Write homework.md)
+    //   write-class-notes       (one-shot Write)
+    //   write-homework          (one-shot Write)
+    //   plan-tailoring-for-maya (one-shot Write tailoring-plan.md)
+    //   tailor-hw-for-maya      (one-shot Write homework.md)
+    let tailoring_plan = "# Tailoring plan\n\n## Concepts\n- concept: Light reaction\n  interest: studio-ghibli\n  named_element: the kelp forest in Ponyo\n\n## Worked example\n- interest: studio-ghibli\n- named_element: the camphor tree in My Neighbor Totoro\n\n## Problems\n- n: 1\n  interest: studio-ghibli\n  named_element: Ponyo's underwater kelp\n- n: 2\n  interest: studio-ghibli\n  named_element: Spirited Away bathhouse garden\n- n: 3\n  interest: studio-ghibli\n  named_element: the Ghibli forest\n- n: 4\n  interest: studio-ghibli\n  named_element: the camphor tree in Totoro\n- n: 5\n  interest: studio-ghibli\n  named_element: a Ghibli sunset\n";
     for (path, content) in [
         ("class-notes.md", class_notes_body),
         ("homework.md", homework_body),
-        (
-            "notes.md",
-            "# Photosynthesis (Maya — anime edition)\n## Learning objectives\n- ...\n## Key concepts\n### Light reaction\n- via Studio Ghibli analogies\n## Worked example\n- One.\n## Common misconceptions\n- ...\n",
-        ),
+        ("tailoring-plan.md", tailoring_plan),
         (
             "homework.md",
-            "# Homework — Photosynthesis\n## Practice problems\n1. drawing\n2. anime\n3. three\n4. four\n5. five\n## Reflection prompt\nWhy?\n## Suggested time\n30 minutes\n",
+            // Tailored body must diverge enough from the master to clear the
+            // validate-tailor-divergence step (30 % of body lines must be new).
+            "# Homework — Photosynthesis\n## Practice problems\n1. Maya — explain how Ponyo's underwater plants would handle blue-light filtering. (maps to: Light reaction)\n2. Sketch a leaf in Spirited Away's bathhouse garden and label its chloroplasts. (maps to: Light reaction)\n3. Compare a Ghibli forest to a real chloroplast in three short bullets. (maps to: Light reaction)\n4. Predict what Totoro's giant camphor tree does at night, in terms of photosynthesis. (maps to: Light reaction)\n5. Identify three pigments other than chlorophyll using the colors in a Ghibli sunset. (maps to: Light reaction)\n## Reflection prompt\nIf My Neighbor Totoro shifted to winter, what slows down for the camphor tree?\n## Suggested time\n25 minutes\n",
         ),
     ] {
         backend.push(
@@ -101,10 +103,9 @@ async fn class_plan_end_to_end_with_mocks() {
     assert!(lesson.join("source.txt").exists());
     assert!(lesson.join("class-notes.md").exists());
     assert!(lesson.join("homework.md").exists());
-    assert!(lesson.join("per-student/maya/notes.md").exists());
+    assert!(lesson.join("per-student/maya/tailoring-plan.md").exists());
     assert!(lesson.join("per-student/maya/homework.md").exists());
     assert!(lesson.join("class-notes.pdf").exists());
     assert!(lesson.join("homework.pdf").exists());
-    assert!(lesson.join("per-student/maya/notes.pdf").exists());
     assert!(lesson.join("per-student/maya/homework.pdf").exists());
 }

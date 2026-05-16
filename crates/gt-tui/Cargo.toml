@@ -33,4 +33,5 @@ crossterm = "0.28"
 tui-textarea = "0.7"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
+libc = { workspace = true }
 

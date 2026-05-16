@@ -1,0 +1,32 @@
+Name: Sam
+Age & grade: 14, 9th grade.
+
+Interests & passions:
+Makes hip-hop and K-pop-style beats in FL Studio — three years of self-taught
+production. Knows his way around a sidechain compressor and can hum the
+difference between a 808 and a sub-bass. Currently obsessed with a New
+Jeans-meets-late-J-Dilla sound — quantized to a "swing" feel rather than
+straight 16ths. Fluent in K-pop lore: NewJeans, IVE, Stray Kids, plus older
+SHINee and BIGBANG. Writes lyrics in his Notes app, occasionally in
+Korean (with a translator) which his older sister corrects.
+
+Hobbies & media:
+- FL Studio every night for at least 45 minutes; shares loops on a private
+  Discord server with three friends from school.
+- Listens to "Song Exploder" (the podcast) on the bus.
+- Watches K-pop dance practice videos and reaction channels (DKDKTV).
+- Plays Beat Saber when his mom isn't using the headset.
+
+Learning style & teacher notes:
+Low math confidence — failed the last fractions unit (final score 41%) and
+since then has been quietly disengaging from any math task that involves
+ratios or division. Strong verbal: when he explains a beat structure aloud,
+he uses fractions naturally ("the snare hits on the 'and' of 2 and 4, so
+it's a 1/8th displaced from the kick"). He doesn't realize he's already
+fluent in the underlying ideas. The instructional move that works: re-skin
+math problems through beats and time signatures, then *retroactively* show
+him "you just did exactly what you do every night in FL Studio." Wants to
+feel smart again — he is sensitive to being singled out as struggling, so
+avoid public correction. He responds well to one-on-one micro-checks
+("show me on paper what you'd do in FL Studio for this"). His default
+when stuck is to laugh and deflect — wait through the laugh, then redirect.

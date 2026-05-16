@@ -501,6 +501,15 @@ fn parse_gemma_tool_code(body: &str) -> Option<RawToolCall> {
         return Some(call);
     }
 
+    // Shell-flag pattern: `Write -f path -e "content"`. Captured live from
+    // a Gemma 3n student-add trace where the model emitted Unix-style flags
+    // instead of Python kwargs. Without this rule, the prose fallback below
+    // would lump the entire `-f X -e "..."` string into `path` and the Write
+    // tool would error out for a missing `content`.
+    if let Some(call) = parse_shell_flag_call(trimmed) {
+        return Some(call);
+    }
+
     // Plain `<Verb> <arg>` prose. Pick the first line and parse it.
     let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
     if let Some((verb, rest)) = first_line.split_once(char::is_whitespace) {
@@ -517,6 +526,124 @@ fn parse_gemma_tool_code(body: &str) -> Option<RawToolCall> {
         return Some(build_prose_call(&cap, ""));
     }
     None
+}
+
+/// Recognize shell-flag tool calls: `Write -f path -e "content"` (and
+/// long-form `--path`, `--content`, alternative short flags `-p`, `-c`).
+/// This is a Gemma 3n quirk where the model emits a Unix CLI-style call
+/// instead of the Python-style call shown in the system prompt examples.
+/// Returns None when the input doesn't *look* shell-style so the caller
+/// can fall through to other patterns.
+fn parse_shell_flag_call(s: &str) -> Option<RawToolCall> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let name_start = i;
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        i += 1;
+    }
+    let name = std::str::from_utf8(&bytes[name_start..i]).ok()?.to_string();
+    let cap = capitalize(&name);
+    if !TOOL_VERBS.contains(&cap.as_str()) {
+        return None;
+    }
+    // A shell-style call cannot have an immediate `(` — that's Python.
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'-' {
+        return None; // no leading flag — not shell-style.
+    }
+
+    // Map of short/long flags to canonical kwarg names. `-e` is Gemma's most
+    // common content flag (it has seen `Write -f X -e "Y"` patterns several
+    // times); `-c` and `--content` are the obvious aliases. `-p` / `--path`
+    // cover the path side.
+    let canonical = |flag: &str| -> Option<&'static str> {
+        match flag {
+            "-p" | "--path" | "-f" | "--file" => Some("path"),
+            "-c" | "--content" | "-e" | "--expression" | "--body" | "--text" => Some("content"),
+            "-o" | "--old" | "--old-text" => Some("old_text"),
+            "-n" | "--new" | "--new-text" => Some("new_text"),
+            _ => None,
+        }
+    };
+
+    let mut args = serde_json::Map::new();
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] != b'-' {
+            // Trailing non-flag prose ("Done." etc.) — stop parsing.
+            break;
+        }
+        let flag_start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'=' {
+            i += 1;
+        }
+        let flag = std::str::from_utf8(&bytes[flag_start..i]).ok()?;
+        let key = canonical(flag)?; // unknown flag → bail
+        // Allow `--path=value` and `--path value`.
+        if i < bytes.len() && bytes[i] == b'=' {
+            i += 1;
+        } else {
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+        }
+        // Read value: quoted (single or double) or bare-up-to-whitespace.
+        let value = if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+            let quote = bytes[i];
+            i += 1;
+            let val_start = i;
+            let mut esc = false;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if esc {
+                    esc = false;
+                    i += 1;
+                    continue;
+                }
+                if b == b'\\' {
+                    esc = true;
+                    i += 1;
+                    continue;
+                }
+                if b == quote {
+                    break;
+                }
+                i += 1;
+            }
+            let val_end = i;
+            if i < bytes.len() && bytes[i] == quote {
+                i += 1;
+            }
+            unquote_inner(&bytes[val_start..val_end])
+        } else {
+            let val_start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            std::str::from_utf8(&bytes[val_start..i])
+                .unwrap_or("")
+                .to_string()
+        };
+        args.insert(key.to_string(), serde_json::Value::String(value));
+    }
+    if args.is_empty() {
+        return None;
+    }
+    Some(RawToolCall {
+        id: ToolCallId::new(),
+        name: cap,
+        args: serde_json::Value::Object(args),
+    })
 }
 
 /// Permissive recovery: tolerates missing `)` and unterminated string
@@ -977,6 +1104,20 @@ pub fn repair_and_parse(raw: &str) -> (serde_json::Value, bool, bool) {
     let mut current = raw.to_string();
     let mut any_repair = false;
 
+    // Normalize smart/curly quotes and a few common typographic variants to
+    // their ASCII equivalents BEFORE any other pass. Captured live from
+    // Gemma 3n class-plan traces (v5+) where `Write(path=..., content="…")`
+    // and `–` em-dashes appear inside the content payload. Without this,
+    // serde_json sees `"` and fails immediately.
+    let fixed = normalize_typography(&current);
+    if fixed != current {
+        any_repair = true;
+        current = fixed;
+        if let Ok(v) = serde_json::from_str(&current) {
+            return (v, true, false);
+        }
+    }
+
     let fixed = escape_unescaped_newlines_in_strings(&current);
     if fixed != current {
         any_repair = true;
@@ -1037,6 +1178,81 @@ pub fn repair_and_parse(raw: &str) -> (serde_json::Value, bool, bool) {
     }
 
     (serde_json::json!({ "_raw": raw }), any_repair, true)
+}
+
+/// Replace typographic quote/dash characters with their ASCII counterparts.
+/// Keeps em-dash (`—`) as-is when it sits inside a string literal (it's valid
+/// UTF-8 inside a JSON string body) but swaps curly quotes for straight ones
+/// outside strings so `serde_json` can parse the structure.
+fn normalize_typography(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        let mapped = match ch {
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+            other => other,
+        };
+        out.push(mapped);
+    }
+    out
+}
+
+/// Try to coerce a string into a typed JSON value. First attempts a direct
+/// parse, then `repair_and_parse`. Returns `None` only when both fail.
+/// Useful for deterministic validators that want to be tolerant of the
+/// model's typical post-Write artifacts (smart quotes, over-escaped strings).
+pub fn try_repair_json_value(raw: &str) -> Option<serde_json::Value> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+        return Some(v);
+    }
+    // Captured Gemma quirk: the model writes a JSON file whose contents are
+    // ALREADY escaped, producing something like `[\"a", \"b"]` on disk. One
+    // round of `unquote_inner`-style unescaping reverses it.
+    let unescaped = unescape_one_layer(raw);
+    if unescaped != raw {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&unescaped) {
+            return Some(v);
+        }
+    }
+    let (v, _had, unrepairable) = repair_and_parse(raw);
+    if unrepairable {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+/// Remove ONE level of backslash-escaping from a string. So `[\"a", \"b"]`
+/// becomes `["a", "b"]`. Skips invalid escape pairs to stay safe.
+fn unescape_one_layer(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek().copied() {
+                Some('"') => {
+                    out.push('"');
+                    chars.next();
+                }
+                Some('\\') => {
+                    out.push('\\');
+                    chars.next();
+                }
+                Some('n') => {
+                    out.push('\n');
+                    chars.next();
+                }
+                Some('t') => {
+                    out.push('\t');
+                    chars.next();
+                }
+                _ => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn escape_unescaped_newlines_in_strings(s: &str) -> String {
@@ -1348,5 +1564,87 @@ mod tests {
         let p = parse(s);
         assert_eq!(p.tool_calls.len(), 1);
         assert_eq!(p.text, "extra");
+    }
+
+    // ---------- Phase 2 quirks ----------
+
+    /// Captured from Gemma 3n E2B trace
+    /// `phase-2-student-add-elara-iter1.jsonl` (2026-05-16 write-student).
+    /// The model emitted Unix-style flags inside a `tool_code` fence —
+    /// `Write -f path -e "content"` — bypassing the Python kwargs syntax
+    /// the system prompt showed. Without `parse_shell_flag_call` the prose
+    /// fallback lumped the entire string into `path` and Write failed for
+    /// missing `content`.
+    #[test]
+    fn gemma_quirk_shell_flag_write_short_form() {
+        let s = "```tool_code\nWrite -f student.md -e \"# Elara\\n\\n## Snapshot\\n- 14 years old\"\n```";
+        let p = parse(s);
+        assert_eq!(p.tool_calls.len(), 1, "got: {:?}", p);
+        let c = &p.tool_calls[0];
+        assert_eq!(c.call.name, "Write");
+        assert_eq!(c.call.args["path"], "student.md");
+        let content = c.call.args["content"].as_str().unwrap();
+        assert!(content.starts_with("# Elara"));
+        assert!(content.contains("Snapshot"));
+    }
+
+    #[test]
+    fn gemma_quirk_shell_flag_write_long_form() {
+        let s = "```tool_code\nWrite --path \"x.md\" --content \"hello world\"\n```";
+        let p = parse(s);
+        assert_eq!(p.tool_calls.len(), 1);
+        assert_eq!(p.tool_calls[0].call.args["path"], "x.md");
+        assert_eq!(p.tool_calls[0].call.args["content"], "hello world");
+    }
+
+    #[test]
+    fn gemma_quirk_shell_flag_with_equals() {
+        let s = "```tool_code\nWrite --path=\"x.md\" --content=\"hello\"\n```";
+        let p = parse(s);
+        assert_eq!(p.tool_calls.len(), 1);
+        assert_eq!(p.tool_calls[0].call.args["path"], "x.md");
+        assert_eq!(p.tool_calls[0].call.args["content"], "hello");
+    }
+
+    #[test]
+    fn gemma_quirk_shell_flag_does_not_eat_python_calls() {
+        // The Python parser must still win when a `(` is present — shell-flag
+        // parser bails on the first non-flag.
+        let s = "```tool_code\nWrite(path=\"x.md\", content=\"y\")\n```";
+        let p = parse(s);
+        assert_eq!(p.tool_calls.len(), 1);
+        assert_eq!(p.tool_calls[0].call.args["path"], "x.md");
+        assert_eq!(p.tool_calls[0].call.args["content"], "y");
+    }
+
+    /// Captured live (2026-05-16): smart/curly quotes inside a fenced JSON
+    /// payload. Before the typography normalize pass, serde_json choked on
+    /// the U+201C/U+201D characters.
+    #[test]
+    fn repair_handles_curly_quotes_in_json() {
+        let raw = "{\u{201C}name\u{201D}: \u{201C}Read\u{201D}, \u{201C}args\u{201D}: {\u{201C}path\u{201D}: \u{201C}x.md\u{201D}}}";
+        let (v, had_repair, unrepairable) = repair_and_parse(raw);
+        assert!(!unrepairable, "got: {v:?}");
+        assert!(had_repair);
+        assert_eq!(v["name"], "Read");
+        assert_eq!(v["args"]["path"], "x.md");
+    }
+
+    /// Captured live (2026-05-16 extract-tags): the model wrote `tags.json`
+    /// containing `[\"a", \"b"]` — its content was already escaped one extra
+    /// layer. `try_repair_json_value` must strip that layer.
+    #[test]
+    fn repair_handles_overescaped_tags_json() {
+        let raw = r#"[\"programming", \"reading", \"hiking"]"#;
+        let v = try_repair_json_value(raw).expect("repair");
+        let arr: Vec<String> = serde_json::from_value(v).expect("vec");
+        assert_eq!(arr, vec!["programming", "reading", "hiking"]);
+    }
+
+    #[test]
+    fn repair_passthrough_well_formed_json() {
+        let raw = r#"["a","b","c"]"#;
+        let v = try_repair_json_value(raw).expect("repair");
+        assert_eq!(v[0], "a");
     }
 }

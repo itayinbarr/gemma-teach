@@ -94,19 +94,19 @@ impl DeterministicStep for MkStudentDir {
 
 const STUDENT_MD_FILENAME: &str = "student.md";
 
-const WRITE_STUDENT_SYSTEM: &str = r#"You are a careful teaching assistant working inside a fixed working directory.
+const WRITE_STUDENT_SYSTEM: &str = r##"You are a careful teaching assistant working inside a fixed working directory.
 
-You can ONLY use these tools:
+You can ONLY use this tool:
   - Write — creates a NEW file inside the working directory.
 
-How to use tools:
-  - Emit tool calls natively. Do NOT wrap them in code fences or XML tags.
-  - One tool call is enough for this task. After Write succeeds, reply exactly:
-    Done.
-
-Completion:
-  - When the task is fully done, respond with the single word `Done.` and emit no more tool calls.
-"#;
+How to use tools (MANDATORY — the harness will reject other shapes):
+  - Use a `tool_code` fence with a Python-style call:
+    ```tool_code
+    Write(path="student.md", content="# Name\n\n## Snapshot\n- one\n- two\n...")
+    ```
+  - Do NOT print the file body as a plain markdown block. Do NOT use Unix flags (`-f`, `-e`, `--path`). The ONLY accepted shape is the `tool_code` fence above.
+  - One Write call is enough for this task. After Write succeeds, reply exactly: Done.
+"##;
 
 struct WriteStudent;
 
@@ -126,36 +126,47 @@ impl AgentStepFactory for WriteStudent {
             .unwrap_or_default();
 
         let task = format!(
-            r#"Create a profile file for the student below.
+            r#"You are creating `student.md` for {name} ({date}).
 
-Required structure (in this order):
+The teacher's raw notes about this student:
+-----
+{description}
+-----
 
+Using ONLY the facts in those notes (do not invent details), write `student.md` with EXACTLY this structure. Replace every `<…>` placeholder with real content drawn from the notes. Do NOT emit the placeholder text verbatim.
+
+```
 # {name}
 
 ## Snapshot
-- 2-4 bullets summarizing this student.
+- <bullet 1: one-sentence summary>
+- <bullet 2>
+- <bullet 3>
 
 ## Interests
-- 2-6 bullets of subjects, topics, or activities they care about.
+- <named topic 1>
+- <named topic 2>
+- <named topic 3>
 
 ## Hobbies
-- 2-6 bullets of how they spend their time outside class.
+- <named hobby 1>
+- <named hobby 2>
+- <named hobby 3>
 
 ## Media they love
-- 2-6 bullets: shows, books, films, music, games.
+- <named show / book / game / artist 1>
+- <named title 2>
+- <named title 3>
 
 ## Notes for tailoring lessons
-- 2-4 short bullets a teacher can use to make material feel personal to this student.
+- <operational bullet: each must name a specific interest from above AND specify a concrete instructional move. Shape: "When introducing <topic>, reference <named interest>: <how to use it as a scaffold>.">
+- <operational bullet 2: same shape as above>
+- <operational bullet 3: same shape as above>
+```
 
-Be concrete and faithful to the notes below. Do not invent details that are not supported.
+Each `## Notes for tailoring lessons` bullet MUST name something specific from the notes above. "Use her interests" is too vague — write what concrete thing to do.
 
-Date: {date}
-Teacher's raw notes:
----
-{description}
----
-
-Write the file to `student.md` using the Write tool. After Write succeeds, reply: Done."#,
+Call Write once with the filled-in content. After Write succeeds, reply: Done."#,
             name = name,
             date = date,
             description = description,
@@ -242,11 +253,37 @@ impl DeterministicStep for ValidateTags {
                 step: "validate-tags".into(),
                 msg: format!("read {}: {e}", path.display()),
             })?;
-        let parsed: Vec<String> =
-            serde_json::from_str(&text).map_err(|e| FlowError::Step {
-                step: "validate-tags".into(),
-                msg: format!("{TAGS_JSON_FILENAME} is not a JSON array of strings: {e}"),
-            })?;
+
+        // Try the strict parse first; on failure, run it through the parser's
+        // repair pipeline. Gemma 3n has been observed writing a tags.json file
+        // whose contents are pre-escaped (`[\"a\", \"b\"]` literally on disk)
+        // — `try_repair_json_value` strips one layer of escaping and re-parses.
+        let parsed: Vec<String> = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => {
+                let repaired = gt_core::parser::try_repair_json_value(&text)
+                    .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok());
+                match repaired {
+                    Some(v) => {
+                        // Rewrite the cleaned-up JSON to disk so downstream
+                        // consumers (intersections, class-plan) see canonical
+                        // form.
+                        let cleaned = serde_json::to_string(&v).unwrap_or(text.clone());
+                        tokio::fs::write(&path, cleaned.as_bytes()).await.ok();
+                        v
+                    }
+                    None => {
+                        return Err(FlowError::Step {
+                            step: "validate-tags".into(),
+                            msg: format!(
+                                "{TAGS_JSON_FILENAME} is not a JSON array of strings even after repair. Content begins: {}",
+                                text.chars().take(120).collect::<String>()
+                            ),
+                        });
+                    }
+                }
+            }
+        };
         if parsed.is_empty() {
             return Err(FlowError::Step {
                 step: "validate-tags".into(),

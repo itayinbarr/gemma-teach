@@ -53,8 +53,36 @@ pub enum ClassPlanField {
 #[derive(Debug, Default)]
 pub struct StudentAddForm {
     pub name: String,
-    pub description: String,
+    pub age_grade: String,
+    pub interests: String,
+    pub hobbies_media: String,
+    pub learning_notes: String,
     pub focus: FormField,
+}
+
+impl StudentAddForm {
+    /// Concatenate the five fields into a single labeled description that
+    /// `WriteStudent`'s task prompt consumes as `{description}`. The labels
+    /// give the small model strong scaffolding even when individual fields
+    /// are short — much better than a single free-text blob.
+    pub fn compose_description(&self) -> String {
+        let mut out = String::new();
+        let push = |out: &mut String, label: &str, val: &str| {
+            let v = val.trim();
+            if !v.is_empty() {
+                out.push_str("[");
+                out.push_str(label);
+                out.push_str("]\n");
+                out.push_str(v);
+                out.push_str("\n\n");
+            }
+        };
+        push(&mut out, "Age & grade", &self.age_grade);
+        push(&mut out, "Interests & passions", &self.interests);
+        push(&mut out, "Hobbies & media", &self.hobbies_media);
+        push(&mut out, "Learning style & teacher notes", &self.learning_notes);
+        out.trim_end().to_string()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -82,11 +110,41 @@ pub fn slug_or_self(s: &str) -> String {
     out
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum FormField {
     #[default]
     Name,
-    Description,
+    AgeGrade,
+    Interests,
+    HobbiesMedia,
+    LearningNotes,
+}
+
+impl FormField {
+    pub fn next(self) -> Self {
+        match self {
+            FormField::Name => FormField::AgeGrade,
+            FormField::AgeGrade => FormField::Interests,
+            FormField::Interests => FormField::HobbiesMedia,
+            FormField::HobbiesMedia => FormField::LearningNotes,
+            FormField::LearningNotes => FormField::Name,
+        }
+    }
+    pub fn prev(self) -> Self {
+        match self {
+            FormField::Name => FormField::LearningNotes,
+            FormField::AgeGrade => FormField::Name,
+            FormField::Interests => FormField::AgeGrade,
+            FormField::HobbiesMedia => FormField::Interests,
+            FormField::LearningNotes => FormField::HobbiesMedia,
+        }
+    }
+    pub fn is_multiline(self) -> bool {
+        matches!(
+            self,
+            FormField::Interests | FormField::HobbiesMedia | FormField::LearningNotes,
+        )
+    }
 }
 
 pub struct App {

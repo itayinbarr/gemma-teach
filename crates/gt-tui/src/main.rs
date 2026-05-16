@@ -3,6 +3,7 @@ use clap::Parser;
 
 mod app;
 mod backend_select;
+mod log;
 mod slash;
 mod theme;
 mod ui;
@@ -50,7 +51,21 @@ async fn main() -> Result<()> {
         return backend_select::download_default_model().await;
     }
 
+    let log_path = log_file_path();
+    if let Some(parent) = log_path.parent() {
+        tokio::fs::create_dir_all(parent).await.ok();
+    }
+    eprintln!("Logs: {}", log_path.display());
+
     let backend = backend_select::build(&args.backend, args.model.clone()).await?;
     let app = app::App::new(root, backend);
-    ui::run(app).await
+    ui::run(app, log_path).await
+}
+
+fn log_file_path() -> std::path::PathBuf {
+    let base = dirs::home_dir()
+        .map(|h| h.join(".gemma-teach").join("logs"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".gemma-teach/logs"));
+    let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+    base.join(format!("gemma-teach-{day}.log"))
 }

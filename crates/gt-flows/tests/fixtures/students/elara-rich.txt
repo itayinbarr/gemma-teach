@@ -1,0 +1,29 @@
+Name: Elara
+Age & grade: 14, 9th grade.
+
+Interests & passions:
+Astrophysics is her north star — she's read most of Sean Carroll's pop-science
+output and watches every NASA / JWST press conference live. She can sketch the
+HR diagram from memory and gets genuinely excited about exoplanet atmospheres.
+She also plays competitive Magic: The Gathering at the local LGS — Pioneer
+format, currently maining a Rakdos Midrange deck. Loves explaining sequencing
+puzzles and combat math. Devours hard sci-fi: Ted Chiang, Cixin Liu, Greg
+Egan. Has a small home telescope (8" Dobsonian) and keeps an observation log.
+
+Hobbies & media:
+- Stargazing on clear nights from her grandfather's backyard.
+- Building MTG decks in Moxfield; theorycrafting on YouTube (LSV, Reid Duke).
+- Reads Liu Cixin's "Three-Body" trilogy on repeat.
+- Watches Kurzgesagt, PBS Space Time, Veritasium.
+- Plays Outer Wilds and No Man's Sky — anything with celestial mechanics.
+
+Learning style & teacher notes:
+Perfectionist — she freezes on open-ended prompts because she's afraid of
+producing something "not good enough." Best learning happens when she has a
+concrete framework to bounce off (e.g. "use Bohr's model first, then we'll
+critique it"). She visibly relaxes when you frame a problem as a puzzle with
+known constraints. Push back gently when she over-explains; ask her to make a
+prediction before she derives. She struggles to ask for help — watch for the
+quiet "I'm fine" while she's stuck. Use her MTG deckbuilding instinct as a
+metaphor for hypothesis-revision: each card is a variable; the metagame is
+the experimental context.

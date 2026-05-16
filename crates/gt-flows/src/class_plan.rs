@@ -42,7 +42,6 @@ const HOMEWORK_KEY: &str = "homework_md";
 const SOURCE_TXT_FILENAME: &str = "source.txt";
 const CLASS_NOTES_FILENAME: &str = "class-notes.md";
 const HOMEWORK_FILENAME: &str = "homework.md";
-const STUDENT_NOTES_FILENAME: &str = "notes.md";
 const STUDENT_HW_FILENAME: &str = "homework.md";
 
 pub fn build_flow(
@@ -67,26 +66,44 @@ pub fn build_flow(
         },
         StepNode::agent("write-class-notes", WriteClassNotes),
         StepNode::agent("write-homework", WriteHomework),
+        StepNode::det(
+            "validate-homework-mapping",
+            ValidateHomeworkMapping {
+                path: HOMEWORK_FILENAME.into(),
+                source: HomeworkSource::Master,
+            },
+        ),
     ];
     // Per-student steps. We copy context deterministically into the per-student dir,
     // then run the tailor session against that dir. Tailor sessions run under the
     // parallel group "tailor" so the orchestrator's semaphore caps concurrency.
     for slug in &student_slugs {
-        // mk-per-student-dir is a tiny deterministic step — we still need the
-        // directory to exist before the agent session writes into it, but we
-        // no longer copy the master notes/homework here. Their content is
-        // pre-loaded directly from the lesson dir at session-build time.
+        // Per-student pipeline. Master class-notes are shared across all
+        // students — mirrors real teaching practice where teachers share
+        // notes and differentiate via assignments. Each student gets a
+        // tailoring plan + a personalized homework sheet:
+        //
+        //   mk-dir-for-<slug>              (det)
+        //   plan-tailoring-for-<slug>      (agent — emits tailoring-plan.md)
+        //   validate-tailoring-plan-<slug> (det — checks plan shape)
+        //   tailor-hw-for-<slug>           (agent — uses plan to write homework.md)
+        //   validate-tailored-hw-<slug>    (det — concept-set + mapping)
+        //   validate-tailor-divergence-<slug> (det — homework must differ from master)
         steps.push(StepNode::det(
             format!("mk-dir-for-{slug}"),
             MkPerStudentDir { slug: slug.clone() },
         ));
         steps.push(
             StepNode::agent(
-                format!("tailor-notes-for-{slug}"),
-                TailorNotesForStudent { slug: slug.clone() },
+                format!("plan-tailoring-for-{slug}"),
+                PlanTailoring { slug: slug.clone() },
             )
             .in_group("tailor"),
         );
+        steps.push(StepNode::det(
+            format!("validate-tailoring-plan-{slug}"),
+            ValidateTailoringPlan { slug: slug.clone() },
+        ));
         steps.push(
             StepNode::agent(
                 format!("tailor-hw-for-{slug}"),
@@ -94,6 +111,20 @@ pub fn build_flow(
             )
             .in_group("tailor"),
         );
+        steps.push(StepNode::det(
+            format!("validate-tailored-hw-{slug}"),
+            ValidateHomeworkMapping {
+                path: STUDENT_HW_FILENAME.into(),
+                source: HomeworkSource::PerStudent { slug: slug.clone() },
+            },
+        ));
+        steps.push(StepNode::det(
+            format!("validate-tailor-divergence-{slug}"),
+            ValidateTailorDivergence {
+                slug: slug.clone(),
+                min_change_ratio: 0.30,
+            },
+        ));
     }
     steps.push(StepNode::det(
         "compile-pdfs",
@@ -266,7 +297,7 @@ impl AgentStepFactory for WriteClassNotes {
 - 2-4 bullets.
 
 ## Worked example
-- A single concrete example that uses these concepts.
+- A single concrete example that uses these concepts. Pull a NAMED entity or a numerical value directly from the source — do not paraphrase. The example must reference at least two of the Key concepts by name.
 
 ## Common misconceptions
 - 2-4 bullets a teacher should pre-empt.
@@ -298,24 +329,32 @@ impl AgentStepFactory for WriteHomework {
         let class_notes = std::fs::read_to_string(dir.join(CLASS_NOTES_FILENAME))
             .unwrap_or_else(|_| "(class-notes.md not found)".into());
         let task = format!(
-            r#"Below is today's class-notes.md. Write `{HOMEWORK_FILENAME}` with EXACTLY this structure:
+            r#"Write today's homework based on the class-notes below.
 
+Constraints (you, the model, must follow these — they describe how to fill in the template, do NOT include this paragraph in the file):
+  • Every numbered problem MUST end with ` (maps to: <Concept Name>)`. `<Concept Name>` is one of the `### <concept>` headings from class-notes.md, copied verbatim. A downstream validator rejects the file if any numbered line is missing this suffix.
+  • Problems grow in difficulty from 1 to 5.
+  • Replace every `<…>` placeholder below with real content. Do NOT echo the placeholder text.
+
+Write `{HOMEWORK_FILENAME}` with EXACTLY this structure:
+
+```
 # Homework — <same title as class-notes.md>
 
 ## Practice problems
-1. <problem mapped to a concept from ## Key concepts>
-2. <problem>
-3. <problem>
-4. <problem>
-5. <problem>
+1. <problem statement> (maps to: <concept name>)
+2. <problem statement> (maps to: <concept name>)
+3. <problem statement> (maps to: <concept name>)
+4. <problem statement> (maps to: <concept name>)
+5. <problem statement> (maps to: <concept name>)
 
 ## Reflection prompt
-One short open-ended question.
+<one open-ended question about today's lesson>
 
 ## Suggested time
-e.g., "30 minutes"
+<a realistic number, e.g. "30 minutes">
+```
 
-Every problem MUST map to a concept from `## Key concepts` of class-notes.md. Problems should grow in difficulty.
 After Write succeeds, reply: Done.
 
 --- class-notes.md ---
@@ -350,33 +389,41 @@ impl DeterministicStep for MkPerStudentDir {
     }
 }
 
-// ----- Step 6: tailor-for-<student> (parallel group "tailor") ---------------
+// ----- Step 6a: plan-tailoring-for-<student> --------------------------------
+//
+// Splits the old "do everything in one shot" tailor session into a small
+// PLAN step (this) and a focused WRITE step (the existing tailor agents,
+// which now consume the plan). Per `docs/tailor-decomposition.md`.
+//
+// The agent emits one structured JSON object that names — for each `###
+// <concept>` heading in master class-notes.md — which student interest to
+// use and which SPECIFIC element from inside that interest (a character,
+// a place, a mechanic, a song, a track, a technique). Also a worked-example
+// anchor element, and a per-problem element for the master homework's
+// problem count. The output is small (~30 lines of JSON) so the model can
+// reason about all the small picks at once without juggling structure.
 
-// Tailor session: we split into TWO one-shot sessions per student so each
-// session emits exactly one Write call. The orchestrator interleaves them in
-// the original parallel group. (See `build_flow` for the wiring.)
-const TAILOR_SYSTEM: &str = r##"You are a careful teaching assistant tailoring a lesson for one student.
+const TAILORING_PLAN_FILENAME: &str = "tailoring-plan.md";
+
+const PLAN_TAILORING_SYSTEM: &str = r##"You are picking concrete tailoring anchors for one specific student.
 
 You can ONLY use this tool:
   - Write — creates a NEW file inside the working directory.
 
-How to use tools:
-  - Use `tool_code` fences to call tools, e.g.:
+How to use tools (MANDATORY):
+  - Use a `tool_code` fence with a Python-style call:
     ```tool_code
-    Write(path="notes.md", content="# Title\n...")
+    Write(path="tailoring-plan.md", content="# Plan\n...")
     ```
-  - One Write call is enough for this task. After Write succeeds, reply exactly: Done.
+  - One Write call is enough. After Write succeeds, reply exactly: Done.
 
-NON-NEGOTIABLE rules:
-  - Cover the SAME concepts and the SAME learning objectives as the master file.
-  - Re-skin examples, analogies, and framings using the student's interests.
-  - Keep the same section headings as the original.
+You are NOT writing lesson content. You are only picking specific named anchors that a later step will use to write the lesson. Keep the file short — short lines, no prose, no JSON.
 "##;
 
-struct TailorNotesForStudent {
+struct PlanTailoring {
     slug: String,
 }
-impl AgentStepFactory for TailorNotesForStudent {
+impl AgentStepFactory for PlanTailoring {
     fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
         let dir = lesson_dir(ctx).join("per-student").join(&self.slug);
         let student_root = ctx.root.join("students").join(&self.slug);
@@ -385,12 +432,62 @@ impl AgentStepFactory for TailorNotesForStudent {
             .unwrap_or_else(|_| "(student.md not found)".into());
         let tags_json = std::fs::read_to_string(student_root.join("tags.json"))
             .unwrap_or_else(|_| "(tags.json not found)".into());
-        let class_notes = std::fs::read_to_string(lesson.join(CLASS_NOTES_FILENAME))
-            .unwrap_or_else(|_| "(class-notes.md not found)".into());
-        let task = format!(
-            r#"Rewrite the class-notes for this student. Write `{STUDENT_NOTES_FILENAME}` covering the SAME concepts and objectives, but re-skinned through the student's interests.
+        let class_notes =
+            std::fs::read_to_string(lesson.join(CLASS_NOTES_FILENAME)).unwrap_or_default();
+        let master_hw =
+            std::fs::read_to_string(lesson.join(HOMEWORK_FILENAME)).unwrap_or_default();
+        let concepts: Vec<String> = class_notes
+            .lines()
+            .filter_map(|l| {
+                let t = l.trim();
+                t.strip_prefix("### ").map(|c| c.trim().to_string())
+            })
+            .collect();
+        let problem_count = master_hw
+            .lines()
+            .filter(|l| {
+                let mut chars = l.trim_start().chars();
+                let a = chars.next();
+                let b = chars.next();
+                matches!((a, b), (Some(d), Some(c)) if d.is_ascii_digit() && (c == '.' || c == ')'))
+            })
+            .count();
 
-After Write succeeds, reply: Done.
+        // Markdown template — no nested escaping. Each row is plain text with
+        // `key: value` pairs the validator parses with regex.
+        let concept_template = concepts
+            .iter()
+            .map(|c| format!("- concept: {c}\n  interest: <one of the student's tags>\n  named_element: <a specific element from inside that interest — a character, a place, a mechanic, a song, a technique>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let problem_template = (1..=problem_count.max(1))
+            .map(|i| format!("- n: {i}\n  interest: <one of the student's tags>\n  named_element: <a specific element from inside that interest>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let task = format!(
+            r#"Pick specific tailoring anchors for this student. Write `{TAILORING_PLAN_FILENAME}` with EXACTLY this shape (plain markdown, no JSON, no code fences inside the file):
+
+```
+# Tailoring plan
+
+## Concepts
+{concept_template}
+
+## Worked example
+- interest: <one of the student's tags>
+- named_element: <a specific element from inside that interest>
+
+## Problems
+{problem_template}
+```
+
+Rules:
+  • `interest:` is one of the kebab-case tags from `tags.json` below.
+  • `named_element:` is a SPECIFIC, real thing from inside that interest — a character, a place, a mechanic, a song, a player, a technique. Not the interest's title. Not a generic category word. If you don't know specific elements for a tag, pick a different tag where you do.
+  • Pick DIFFERENT interests across the concepts when possible — variety beats repetition.
+  • Match anchors to what the concept is about, not just to what's catchy.
+  • Keep every `concept:` label and every `n:` number from the template above. Replace every `<…>` placeholder with real content.
 
 --- student.md ---
 {student_md}
@@ -400,23 +497,264 @@ After Write succeeds, reply: Done.
 {tags_json}
 --- end of tags.json ---
 
---- class-notes.md (the master to re-skin) ---
-{class_notes}
---- end of class-notes.md ---"#
+After Write succeeds, reply: Done."#
         );
-        SessionBuilder::new(format!("tailor-notes-for-{}", self.slug), dir)
-            .system_prompt(TAILOR_SYSTEM)
+        SessionBuilder::new(format!("plan-tailoring-for-{}", self.slug), dir)
+            .system_prompt(PLAN_TAILORING_SYSTEM)
             .task_prompt(task)
             .allowed_tools(["Write"])
             .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
     }
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
         vec![(
-            format!("tailored_notes_{}", self.slug),
-            PathBuf::from(STUDENT_NOTES_FILENAME),
+            format!("tailoring_plan_{}", self.slug),
+            PathBuf::from(TAILORING_PLAN_FILENAME),
         )]
     }
 }
+
+// ----- Step 6b: validate-tailoring-plan-<slug> (deterministic) --------------
+
+struct ValidateTailoringPlan {
+    slug: String,
+}
+
+#[async_trait]
+impl DeterministicStep for ValidateTailoringPlan {
+    async fn run(&self, ctx: &FlowCtx) -> Result<StepOutcome, FlowError> {
+        let step = format!("validate-tailoring-plan-{}", self.slug);
+        let path = lesson_dir(ctx)
+            .join("per-student")
+            .join(&self.slug)
+            .join(TAILORING_PLAN_FILENAME);
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| FlowError::Step {
+                step: step.clone(),
+                msg: format!("read {}: {e}", path.display()),
+            })?;
+        let plan = parse_tailoring_plan(&text).map_err(|m| FlowError::Step {
+            step: step.clone(),
+            msg: m,
+        })?;
+        if plan.concepts.is_empty() {
+            return Err(FlowError::Step {
+                step,
+                msg: format!("{TAILORING_PLAN_FILENAME} has no concept entries"),
+            });
+        }
+        for (i, c) in plan.concepts.iter().enumerate() {
+            for (key, val) in [
+                ("concept", &c.concept),
+                ("interest", &c.interest),
+                ("named_element", &c.named_element),
+            ] {
+                if val.trim().is_empty() || val.starts_with('<') {
+                    return Err(FlowError::Step {
+                        step,
+                        msg: format!(
+                            "{TAILORING_PLAN_FILENAME} concepts[{i}].{key} is empty or echoes the placeholder: '{val}'"
+                        ),
+                    });
+                }
+            }
+            // Reject only when the named_element echoes the interest tag verbatim
+            // ("dinosaurs" for tag "dinosaurs"). A proper-noun single word
+            // (e.g. "Allosaurus", "JWST") is legitimately specific.
+            if c.named_element.eq_ignore_ascii_case(&c.interest)
+                || c.named_element
+                    .eq_ignore_ascii_case(&c.interest.replace('-', " "))
+            {
+                return Err(FlowError::Step {
+                    step,
+                    msg: format!(
+                        "{TAILORING_PLAN_FILENAME} concepts[{i}].named_element ('{}') just echoes the interest tag '{}' — pick a more specific element from inside that interest",
+                        c.named_element, c.interest
+                    ),
+                });
+            }
+        }
+        if plan.worked_example.interest.trim().is_empty()
+            || plan.worked_example.named_element.trim().is_empty()
+            || plan.worked_example.interest.starts_with('<')
+            || plan.worked_example.named_element.starts_with('<')
+        {
+            return Err(FlowError::Step {
+                step,
+                msg: format!("{TAILORING_PLAN_FILENAME} worked_example is empty or placeholder"),
+            });
+        }
+        Ok(StepOutcome::default())
+    }
+}
+
+/// Plain-text plan parsed from the markdown tailoring plan file.
+#[derive(Debug, Default)]
+pub struct TailoringPlan {
+    pub concepts: Vec<TailoringConceptEntry>,
+    pub worked_example: TailoringAnchor,
+    pub problems: Vec<TailoringProblemEntry>,
+}
+
+#[derive(Debug, Default)]
+pub struct TailoringConceptEntry {
+    pub concept: String,
+    pub interest: String,
+    pub named_element: String,
+}
+
+#[derive(Debug, Default)]
+pub struct TailoringAnchor {
+    pub interest: String,
+    pub named_element: String,
+}
+
+#[derive(Debug, Default)]
+pub struct TailoringProblemEntry {
+    pub n: u32,
+    pub interest: String,
+    pub named_element: String,
+}
+
+/// Parse the markdown plan format:
+///
+/// ```text
+/// ## Concepts
+/// - concept: Chloroplasts
+///   interest: studio-ghibli
+///   named_element: the bathhouse boiler in Spirited Away
+///
+/// ## Worked example
+/// - interest: studio-ghibli
+/// - named_element: the camphor tree in Totoro
+///
+/// ## Problems
+/// - n: 1
+///   interest: studio-ghibli
+///   named_element: Ponyo's underwater kelp
+/// ```
+///
+/// Tolerant of leading list markers, indent variations, and the model
+/// dropping the section headings. Section context is tracked so a stray
+/// `interest:` line under "## Concepts" knows which concept block it
+/// belongs to.
+pub fn parse_tailoring_plan(s: &str) -> Result<TailoringPlan, String> {
+    enum Section {
+        None,
+        Concepts,
+        WorkedExample,
+        Problems,
+    }
+    let mut sec = Section::None;
+    let mut plan = TailoringPlan::default();
+    let mut cur_concept: Option<TailoringConceptEntry> = None;
+    let mut cur_problem: Option<TailoringProblemEntry> = None;
+    let take_value = |line: &str, key: &str| -> Option<String> {
+        let t = line.trim().trim_start_matches('-').trim();
+        if let Some(rest) = t.strip_prefix(&format!("{key}:")) {
+            Some(rest.trim().to_string())
+        } else if let Some(rest) = t.strip_prefix(&format!("**{key}**:")) {
+            Some(rest.trim().to_string())
+        } else {
+            None
+        }
+    };
+    for raw_line in s.lines() {
+        let line = raw_line.trim_end();
+        let lower = line.trim().to_ascii_lowercase();
+        if lower.starts_with("## concepts") {
+            sec = Section::Concepts;
+            continue;
+        }
+        if lower.starts_with("## worked example") {
+            if let Some(c) = cur_concept.take() {
+                plan.concepts.push(c);
+            }
+            sec = Section::WorkedExample;
+            continue;
+        }
+        if lower.starts_with("## problems") {
+            if let Some(c) = cur_concept.take() {
+                plan.concepts.push(c);
+            }
+            sec = Section::Problems;
+            continue;
+        }
+        match sec {
+            Section::None => {}
+            Section::Concepts => {
+                if let Some(v) = take_value(line, "concept") {
+                    if let Some(c) = cur_concept.take() {
+                        plan.concepts.push(c);
+                    }
+                    let mut c = TailoringConceptEntry::default();
+                    c.concept = v;
+                    cur_concept = Some(c);
+                } else if let Some(v) = take_value(line, "interest") {
+                    if let Some(c) = cur_concept.as_mut() {
+                        c.interest = v;
+                    }
+                } else if let Some(v) = take_value(line, "named_element") {
+                    if let Some(c) = cur_concept.as_mut() {
+                        c.named_element = v;
+                    }
+                }
+            }
+            Section::WorkedExample => {
+                if let Some(v) = take_value(line, "interest") {
+                    plan.worked_example.interest = v;
+                } else if let Some(v) = take_value(line, "named_element") {
+                    plan.worked_example.named_element = v;
+                }
+            }
+            Section::Problems => {
+                if let Some(v) = take_value(line, "n") {
+                    if let Some(p) = cur_problem.take() {
+                        plan.problems.push(p);
+                    }
+                    let mut p = TailoringProblemEntry::default();
+                    p.n = v.trim().parse().unwrap_or(0);
+                    cur_problem = Some(p);
+                } else if let Some(v) = take_value(line, "interest") {
+                    if let Some(p) = cur_problem.as_mut() {
+                        p.interest = v;
+                    }
+                } else if let Some(v) = take_value(line, "named_element") {
+                    if let Some(p) = cur_problem.as_mut() {
+                        p.named_element = v;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(c) = cur_concept.take() {
+        plan.concepts.push(c);
+    }
+    if let Some(p) = cur_problem.take() {
+        plan.problems.push(p);
+    }
+    if plan.concepts.is_empty() && plan.problems.is_empty() {
+        return Err("tailoring-plan.md has no recognized sections".into());
+    }
+    Ok(plan)
+}
+
+// ----- Step 6c/d: tailor-{notes,hw}-for-<student> (parallel group) ----------
+
+const TAILOR_SYSTEM: &str = r##"You are a careful teaching assistant. Your job is mechanical: take the master file, take the pre-picked tailoring anchors from `tailoring-plan.json`, and produce the per-student file.
+
+You can ONLY use this tool:
+  - Write — creates a NEW file inside the working directory.
+
+How to use tools (MANDATORY):
+  - Use a `tool_code` fence with a Python-style call:
+    ```tool_code
+    Write(path="notes.md", content="# Title\n...")
+    ```
+  - One Write call is enough. After Write succeeds, reply exactly: Done.
+
+You are NOT inventing tailoring anchors here — those have already been chosen for you. Your job is to weave the named anchors into the master's structure. Keep the structure of the master EXACTLY: same headings, same number of concepts, same number of bullets per section. Only the wording of bullets and the worked example change.
+"##;
 
 struct TailorHomeworkForStudent {
     slug: String,
@@ -424,30 +762,44 @@ struct TailorHomeworkForStudent {
 impl AgentStepFactory for TailorHomeworkForStudent {
     fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
         let dir = lesson_dir(ctx).join("per-student").join(&self.slug);
-        let student_root = ctx.root.join("students").join(&self.slug);
         let lesson = lesson_dir(ctx);
-        let student_md = std::fs::read_to_string(student_root.join("student.md"))
-            .unwrap_or_else(|_| "(student.md not found)".into());
-        let tags_json = std::fs::read_to_string(student_root.join("tags.json"))
-            .unwrap_or_else(|_| "(tags.json not found)".into());
         let master_hw = std::fs::read_to_string(lesson.join(HOMEWORK_FILENAME))
             .unwrap_or_else(|_| "(homework.md not found)".into());
+        let plan_text =
+            std::fs::read_to_string(dir.join(TAILORING_PLAN_FILENAME)).unwrap_or_default();
+        let plan = parse_tailoring_plan(&plan_text).unwrap_or_default();
+
+        // Inline-expand the per-problem anchors so the model sees explicit
+        // per-line substitution instructions, not a JSON-style plan to
+        // interpret.
+        let mut substitutions = String::new();
+        for p in &plan.problems {
+            if p.n == 0 || p.named_element.is_empty() {
+                continue;
+            }
+            substitutions.push_str(&format!(
+                "  • Problem {}: rewrite the problem statement so its scenario is **{}** ({}). Style: \"In {}, <problem setup that exercises the same concept as the master's problem {}>.\" Keep the master's ` (maps to: …)` suffix verbatim.\n",
+                p.n, p.named_element, p.interest, p.named_element, p.n
+            ));
+        }
+
         let task = format!(
-            r#"Rewrite the homework for this student. Write `{STUDENT_HW_FILENAME}` with the SAME problem count and structure, re-skinned through the student's interests. Each problem must still map to the same concept.
+            r#"Write `{STUDENT_HW_FILENAME}`. Start from the master homework (below). Apply the following EXPLICIT per-problem substitutions — these are the only changes. The `(maps to: …)` suffix on each problem stays verbatim.
 
-After Write succeeds, reply: Done.
+Substitutions to apply:
+{substitutions}
 
---- student.md ---
-{student_md}
---- end of student.md ---
+Keep unchanged:
+  • The title.
+  • The `## Reflection prompt` and `## Suggested time` sections (you may lightly re-skin the reflection prompt to mention the worked example's anchor).
+  • The number of problems.
+  • Every `(maps to: <Concept>)` suffix verbatim.
 
---- tags.json ---
-{tags_json}
---- end of tags.json ---
-
---- homework.md (the master to re-skin) ---
+--- homework.md (the master — apply the substitutions above) ---
 {master_hw}
---- end of homework.md ---"#
+--- end of homework.md ---
+
+After Write succeeds, reply: Done."#
         );
         SessionBuilder::new(format!("tailor-hw-for-{}", self.slug), dir)
             .system_prompt(TAILOR_SYSTEM)
@@ -460,6 +812,215 @@ After Write succeeds, reply: Done.
             format!("tailored_hw_{}", self.slug),
             PathBuf::from(STUDENT_HW_FILENAME),
         )]
+    }
+}
+
+// ----- validate-homework-mapping (deterministic) ----------------------------
+//
+// Enforces the prompt contract: every numbered problem line in the homework
+// file must end with ` (maps to: <Concept>)`. Used for the master homework
+// and for every per-student tailored homework. We do not try to validate
+// that `<Concept>` matches a real `### <concept>` heading from class-notes —
+// that's more fragile than useful and the prompt example shows the right
+// pattern.
+
+enum HomeworkSource {
+    Master,
+    PerStudent { slug: String },
+}
+
+struct ValidateHomeworkMapping {
+    path: String,
+    source: HomeworkSource,
+}
+
+#[async_trait]
+impl DeterministicStep for ValidateHomeworkMapping {
+    async fn run(&self, ctx: &FlowCtx) -> Result<StepOutcome, FlowError> {
+        let dir = match &self.source {
+            HomeworkSource::Master => lesson_dir(ctx),
+            HomeworkSource::PerStudent { slug } => {
+                lesson_dir(ctx).join("per-student").join(slug)
+            }
+        };
+        let path = dir.join(&self.path);
+        let step_name = match &self.source {
+            HomeworkSource::Master => "validate-homework-mapping".to_string(),
+            HomeworkSource::PerStudent { slug } => format!("validate-tailored-hw-{slug}"),
+        };
+        let text = tokio::fs::read_to_string(&path).await.map_err(|e| FlowError::Step {
+            step: step_name.clone(),
+            msg: format!("read {}: {e}", path.display()),
+        })?;
+
+        // Extract the set of valid concept names from the lesson's master
+        // class-notes.md (`### <concept>` headings). Tailored homeworks have
+        // also seen the master's concept set as their valid set — they're
+        // supposed to use the SAME concepts in the SAME order. Without this
+        // check the model can swap the entire topic of a tailored homework
+        // (observed live: photosynthesis homework rewritten as a stellar
+        // evolution homework with fabricated `(maps to: Nebulae)` suffixes).
+        let class_notes_path = lesson_dir(ctx).join(CLASS_NOTES_FILENAME);
+        let valid_concepts: Vec<String> = match tokio::fs::read_to_string(&class_notes_path).await {
+            Ok(s) => s
+                .lines()
+                .filter_map(|l| {
+                    let t = l.trim();
+                    t.strip_prefix("### ").map(|c| c.trim().to_string())
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        let valid_lc: std::collections::HashSet<String> =
+            valid_concepts.iter().map(|c| c.to_lowercase()).collect();
+
+        // Match lines like `1. ...` / `2) ...` and require the literal
+        // `(maps to: …)` suffix. Trailing whitespace is tolerated.
+        let mut bad: Vec<String> = Vec::new();
+        let mut unknown_concept: Vec<String> = Vec::new();
+        for line in text.lines() {
+            let t = line.trim_end();
+            // numbered-problem heuristic: starts with one or two digits then `.` or `)` then space.
+            let mut chars = t.chars();
+            let d1 = chars.next();
+            let d2 = chars.next();
+            let is_numbered = match (d1, d2) {
+                (Some(a), Some(b)) if a.is_ascii_digit() && (b == '.' || b == ')') => true,
+                (Some(a), Some(b)) if a.is_ascii_digit() && b.is_ascii_digit() => {
+                    matches!(chars.next(), Some('.') | Some(')'))
+                }
+                _ => false,
+            };
+            if !is_numbered {
+                continue;
+            }
+            // Trim trailing markdown emphasis or punctuation we don't care about,
+            // then check that the line ends with `(maps to: …)`.
+            let suffix_ok = {
+                let idx = t.rfind("(maps to:");
+                match idx {
+                    None => false,
+                    Some(i) => t[i..].ends_with(')'),
+                }
+            };
+            if !suffix_ok {
+                bad.push(t.to_string());
+                continue;
+            }
+            // Only enforce concept-set membership when we managed to read at
+            // least one `### <concept>` heading from class-notes.md. If we
+            // didn't, fall back to suffix-only checking so the validator
+            // doesn't spuriously fail when class-notes is malformed.
+            if !valid_lc.is_empty() {
+                let idx = t.rfind("(maps to:").unwrap();
+                let inside = t[idx + "(maps to:".len()..t.len() - 1].trim();
+                if !valid_lc.contains(&inside.to_lowercase()) {
+                    unknown_concept.push(format!("'{inside}' on: {t}"));
+                }
+            }
+        }
+        if !bad.is_empty() {
+            let sample = bad.iter().take(3).cloned().collect::<Vec<_>>().join("\n  • ");
+            return Err(FlowError::Step {
+                step: step_name,
+                msg: format!(
+                    "{} numbered problem(s) missing the `(maps to: <Concept>)` suffix. First offending line(s):\n  • {}",
+                    bad.len(),
+                    sample
+                ),
+            });
+        }
+        if !unknown_concept.is_empty() {
+            let sample = unknown_concept
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n  • ");
+            let known = valid_concepts.join(", ");
+            return Err(FlowError::Step {
+                step: step_name,
+                msg: format!(
+                    "{} numbered problem(s) cite a concept that is not in class-notes.md. Known concepts: [{known}]. First offending line(s):\n  • {sample}",
+                    unknown_concept.len()
+                ),
+            });
+        }
+        Ok(StepOutcome::default())
+    }
+}
+
+// ----- validate-tailor-divergence (deterministic) ---------------------------
+//
+// Compares each tailored file against the master on a line-set basis and
+// rejects when the student version is too close to the master (i.e. the
+// model "tailored" by copying). Catches Gemma's worst tailoring failure
+// mode without false positives: a legitimate re-skin preserves headings
+// and objectives but rewrites all the example/bullet prose.
+struct ValidateTailorDivergence {
+    slug: String,
+    /// Minimum fraction of lines that must differ between tailored and master.
+    /// 0.30 means at least 30 % of the non-empty, non-heading lines must be
+    /// new content. Headings count as fixed scaffolding and are excluded.
+    min_change_ratio: f32,
+}
+
+fn body_lines(s: &str) -> Vec<String> {
+    // Normalize whitespace so trivial spacing diffs (e.g. master uses
+    // "1.  foo" with two spaces, tailored uses "1. foo" with one) don't
+    // make a copy appear different to the HashSet membership check.
+    fn normalize(l: &str) -> String {
+        l.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    s.lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with('#')
+                && !l.starts_with("## ")
+                && !l.starts_with("### ")
+        })
+        .map(|l| normalize(&l))
+        .collect()
+}
+
+#[async_trait]
+impl DeterministicStep for ValidateTailorDivergence {
+    async fn run(&self, ctx: &FlowCtx) -> Result<StepOutcome, FlowError> {
+        let step = format!("validate-tailor-divergence-{}", self.slug);
+        let lesson = lesson_dir(ctx);
+        let per = lesson.join("per-student").join(&self.slug);
+        for (master_name, tailored_name, label) in [
+            (HOMEWORK_FILENAME, STUDENT_HW_FILENAME, "homework.md"),
+        ] {
+            let master = match tokio::fs::read_to_string(lesson.join(master_name)).await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let tailored = match tokio::fs::read_to_string(per.join(tailored_name)).await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let m: std::collections::HashSet<String> = body_lines(&master).into_iter().collect();
+            let t: Vec<String> = body_lines(&tailored);
+            if t.is_empty() {
+                continue;
+            }
+            let unchanged = t.iter().filter(|l| m.contains(*l)).count();
+            let change_ratio = 1.0 - (unchanged as f32 / t.len() as f32);
+            if change_ratio < self.min_change_ratio {
+                return Err(FlowError::Step {
+                    step,
+                    msg: format!(
+                        "tailored {label} is {:.0}% identical to the master (only {:.0}% of body lines differ; threshold {:.0}%). The model copied instead of translating. Re-run /class-plan to retry.",
+                        100.0 * (1.0 - change_ratio),
+                        100.0 * change_ratio,
+                        100.0 * self.min_change_ratio
+                    ),
+                });
+            }
+        }
+        Ok(StepOutcome::default())
     }
 }
 
@@ -509,13 +1070,6 @@ impl DeterministicStep for CompilePdfs {
 
         for slug in &self.student_slugs {
             let dir = lesson.join("per-student").join(slug);
-            let (k, p) = compile_one(
-                dir.join(STUDENT_NOTES_FILENAME),
-                notes_tpl.clone(),
-                format!("tailored_notes_pdf_{slug}"),
-            )
-            .await?;
-            outputs.push((k, p));
             let (k, p) = compile_one(
                 dir.join(STUDENT_HW_FILENAME),
                 hw_tpl.clone(),
