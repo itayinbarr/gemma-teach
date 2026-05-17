@@ -25,13 +25,13 @@ Gemma 3n collapses into one of two failure modes:
 
 Both failure modes share a root cause: the task is too big for the model's
 attention budget. The rest of `/class-plan` and `/student-add` already
-follow the little-coder rule — *each agent session does exactly one small
+follow the project's core rule — *each agent session does exactly one small
 thing and the deterministic glue between sessions carries state*. The two
 tailor sessions are the outliers.
 
 This document defines the decomposition.
 
-## Principles (carried from `little_coder_philosophy`)
+## Principles
 
 - One agent session ↔ one narrow decision. Never multiple decisions per
   session.
