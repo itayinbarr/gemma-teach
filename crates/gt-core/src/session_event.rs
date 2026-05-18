@@ -56,6 +56,11 @@ pub enum QualityIssueKind {
     HallucinatedTool { name: String },
     RepeatedToolCall { tool: String },
     MalformedArgs { tool: String },
+    /// Model emitted only a reply marker ("Done." or similar) without making
+    /// any tool call, when tools were required and none had succeeded yet.
+    /// Captured live on Gemma 4 E2B (extract-tags): the model shortcuts to
+    /// the commit phrase instead of doing the Write call first.
+    PrematureCompletion,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -252,8 +252,13 @@ impl LlmBackend for LlamaCppBackend {
 fn render_chat_prompt(req: &GenerateRequest) -> String {
     let mut s = String::new();
     for m in &req.messages {
+        // Gemma 4 has native `system` role support; earlier Gemma generations
+        // did not. Map System messages to "system" — llama.cpp's Gemma 4 chat
+        // template handles it; if Gemma collapses it back to a user turn
+        // internally, behaviour matches Gemma 3 anyway.
         let tag = match m.role {
-            MessageRole::System | MessageRole::User => "user",
+            MessageRole::System => "system",
+            MessageRole::User => "user",
             MessageRole::Assistant => "model",
             MessageRole::Tool => "user", // append tool results as user observations
         };

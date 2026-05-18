@@ -294,6 +294,29 @@ pub fn parse_assistant_output(raw: &str, allow_bare_json: bool) -> ParseOutcome 
         let _ = i;
     }
 
+    // Bare `tool_code` prefix (no opening ``` fence). Gemma 4 omits the fence
+    // openers and emits the language marker as plain text:
+    //
+    //   tool_code
+    //   Write(path="student.md", content="...")
+    //   Done.
+    //
+    // Detect this only when no fenced tool-code claim was made above, and
+    // treat the body up to the trailing reply marker as if it had been
+    // inside a `tool_code` fence.
+    if !any_quirk {
+        if let Some((range, call)) = parse_bare_tool_code_prefix(&working, &consumed) {
+            tool_calls.push(ParsedToolCall {
+                call,
+                source: CallSource::GemmaToolCode,
+                had_repair: true,
+                unrepairable: false,
+            });
+            consumed.push(range);
+            any_quirk = true;
+        }
+    }
+
     if any_quirk || any_fenced_json {
         steer.push(SteerReason::EmbeddedToolCall);
     }
@@ -480,6 +503,49 @@ fn parse_one_call_payload(payload: &str, source: CallSource) -> Option<ParsedToo
 // -----------------------------------------------------------------------------
 
 static TOOL_VERBS: &[&str] = &["Read", "Write", "Edit", "Create", "Save", "View", "Open"];
+
+/// Pattern C — bare `tool_code` prefix (no opening ``` fence):
+///
+///   tool_code
+///   Write(path="student.md", content="...")
+///   Done.
+///
+/// Observed on Gemma 4 E2B: the model emits the language marker as plain
+/// text without the surrounding backtick fence. Re-uses `parse_gemma_tool_code`
+/// for the body. Returns the byte range in the original `working` text to
+/// consume (so it doesn't leak into the visible `text`) plus the parsed call.
+fn parse_bare_tool_code_prefix(
+    working: &str,
+    already_consumed: &[std::ops::Range<usize>],
+) -> Option<(std::ops::Range<usize>, RawToolCall)> {
+    let trimmed = working.trim_start();
+    let leading = working.len() - trimmed.len();
+    let rest = trimmed
+        .strip_prefix("tool_code\n")
+        .or_else(|| trimmed.strip_prefix("tool_code\r\n"))?;
+    let header_len = trimmed.len() - rest.len();
+
+    // Find the body end: the first trailing reply marker on its own line,
+    // or the end of the input. Accept "Done.", "Done", "done.", with leading
+    // whitespace on the marker line.
+    let body_end = ["\nDone.", "\ndone.", "\nDone\n", "\ndone\n", "\nDone"]
+        .iter()
+        .filter_map(|m| rest.find(m))
+        .min()
+        .unwrap_or(rest.len());
+    let body = &rest[..body_end];
+    let call = parse_gemma_tool_code(body)?;
+
+    let abs_start = leading;
+    let abs_end = leading + header_len + body_end;
+    let range = abs_start..abs_end;
+
+    // Don't double-claim something an earlier pass already consumed.
+    if already_consumed.iter().any(|r| ranges_overlap(r, &range)) {
+        return None;
+    }
+    Some((range, call))
+}
 
 fn parse_gemma_tool_code(body: &str) -> Option<RawToolCall> {
     let trimmed = body.trim();
@@ -1554,6 +1620,60 @@ mod tests {
         let content = c.call.args["content"].as_str().unwrap();
         assert!(content.starts_with("# Homework"), "got: {content:?}");
         assert!(content.contains("Practice problems"));
+    }
+
+    /// Captured live from Gemma 4 E2B (2026-05-18 write-student smoke trace):
+    /// the model emits the `tool_code` language marker as plain text, omitting
+    /// the surrounding ``` fence entirely. Body is a normal Python kwargs call
+    /// followed by the literal "Done." commit marker.
+    #[test]
+    fn gemma_4_quirk_bare_tool_code_prefix_no_fence() {
+        let s = concat!(
+            "tool_code\n",
+            "Write(path=\"student.md\", content=\"# Maya\\n\\n## Snapshot\\n- 12 years old\")\n",
+            "Done."
+        );
+        let p = parse(s);
+        assert_eq!(p.tool_calls.len(), 1, "got: {:?}", p);
+        let c = &p.tool_calls[0];
+        assert_eq!(c.call.name, "Write");
+        assert_eq!(c.call.args["path"], "student.md");
+        let content = c.call.args["content"].as_str().unwrap();
+        assert!(content.starts_with("# Maya"), "got: {content:?}");
+        assert!(matches!(c.source, CallSource::GemmaToolCode));
+        // The `tool_code` header and `Done.` marker should not leak into text.
+        assert!(!p.text.contains("tool_code"), "leaked header: {:?}", p.text);
+    }
+
+    #[test]
+    fn gemma_4_quirk_bare_tool_code_prefix_no_done_marker() {
+        // No trailing "Done." — body runs to end of input.
+        let s = concat!(
+            "tool_code\n",
+            "Read(\"student.md\")"
+        );
+        let p = parse(s);
+        assert_eq!(p.tool_calls.len(), 1, "got: {:?}", p);
+        assert_eq!(p.tool_calls[0].call.name, "Read");
+        assert_eq!(p.tool_calls[0].call.args["path"], "student.md");
+    }
+
+    #[test]
+    fn bare_tool_code_does_not_misfire_on_unrelated_prose() {
+        // Text mentions "tool_code" but isn't a leading marker.
+        let s = "I will now use tool_code to write the file.";
+        let p = parse(s);
+        assert!(p.tool_calls.is_empty(), "got: {:?}", p);
+    }
+
+    #[test]
+    fn fenced_tool_code_still_preferred_over_bare() {
+        // When BOTH a real fenced block and trailing bare prefix exist, the
+        // fenced one wins and the bare pass doesn't double-claim.
+        let s = "```tool_code\nWrite(path=\"a.md\", content=\"hello\")\n```\n";
+        let p = parse(s);
+        assert_eq!(p.tool_calls.len(), 1);
+        assert_eq!(p.tool_calls[0].call.args["path"], "a.md");
     }
 
     #[test]

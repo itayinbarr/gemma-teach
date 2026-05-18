@@ -75,6 +75,18 @@ impl QualityMonitor {
             issues.push(empty_response());
         }
 
+        // 1b. Premature completion — model emitted only a reply marker
+        // (Done.) without making a tool call, when tools were required and
+        // no prior tool call has succeeded yet. Distinguishes Gemma 4's
+        // shortcut-to-commit failure from legitimate post-tool "Done.".
+        if outcome.tool_calls.is_empty()
+            && !known_tools.is_empty()
+            && recent.previous.is_empty()
+            && is_reply_marker_only(&outcome.text)
+        {
+            issues.push(premature_completion(known_tools));
+        }
+
         // 2-5. Per-call checks.
         for parsed in &outcome.tool_calls {
             // 5. Malformed args (parser couldn't repair to a real object).
@@ -120,6 +132,29 @@ impl QualityMonitor {
 // Correction message builders. Each is **prescriptive** — it tells the model
 // the exact shape of the next call, not vague guidance.
 // -----------------------------------------------------------------------------
+
+/// True if the text is only a commit-phrase like "Done.", "done", "ok", etc.
+/// — i.e., a reply marker the prompts ask for AFTER a tool call succeeds.
+fn is_reply_marker_only(text: &str) -> bool {
+    let t = text.trim().trim_end_matches(['.', '!']).trim().to_ascii_lowercase();
+    matches!(t.as_str(), "done" | "ok" | "okay" | "finished" | "complete" | "")
+        && !text.trim().is_empty()
+}
+
+fn premature_completion(known: &HashSet<String>) -> QualityIssue {
+    let available = format_known(known);
+    QualityIssue {
+        kind: QualityIssueKind::PrematureCompletion,
+        action: CorrectionAction {
+            message: format!(
+                "You replied with a commit marker (e.g. \"Done.\") before making any tool call. \
+                The task is NOT complete until the required file exists. Call the tool first, \
+                then reply Done. Available tools: {available}. Example shape:\n\
+                ```tool_code\nWrite(path=\"<filename>\", content=\"<file body>\")\n```"
+            ),
+        },
+    }
+}
 
 fn empty_response() -> QualityIssue {
     QualityIssue {
@@ -328,13 +363,63 @@ mod tests {
         let _ = q.inspect(&bad, &known(&["Read"]), &RecentCalls::default());
         assert_eq!(q.consecutive(), 1);
         let good = ParseOutcome {
-            text: "ok".into(),
+            text: "Looking at the file now.".into(),
             thinking: String::new(),
-            tool_calls: vec![],
+            tool_calls: vec![call("Read", serde_json::json!({"path":"a.md"}))],
             steer_reasons: vec![],
         };
         let _ = q.inspect(&good, &known(&["Read"]), &RecentCalls::default());
         assert_eq!(q.consecutive(), 0);
+    }
+
+    #[test]
+    fn premature_completion_detected_on_done_with_no_tool_call() {
+        let mut q = QualityMonitor::new(2);
+        let out = ParseOutcome {
+            text: "Done.".into(),
+            thinking: String::new(),
+            tool_calls: vec![],
+            steer_reasons: vec![],
+        };
+        let (issues, verdict) = q.inspect(&out, &known(&["Write"]), &RecentCalls::default());
+        assert_eq!(issues.len(), 1, "got: {:?}", issues);
+        assert!(matches!(issues[0].kind, QualityIssueKind::PrematureCompletion));
+        assert!(matches!(verdict, CorrectionVerdict::Correctable));
+        assert!(issues[0].action.message.contains("Write"));
+        assert!(issues[0].action.message.contains("Call the tool first"));
+    }
+
+    #[test]
+    fn done_after_successful_call_is_not_premature() {
+        // Previous turn had a successful Write call; current turn's "Done."
+        // is the legitimate commit marker — must NOT flag.
+        let mut q = QualityMonitor::new(2);
+        let out = ParseOutcome {
+            text: "Done.".into(),
+            thinking: String::new(),
+            tool_calls: vec![],
+            steer_reasons: vec![],
+        };
+        let recent = RecentCalls {
+            previous: vec![("Write".into(), serde_json::json!({"path":"a.md"}))],
+        };
+        let (issues, verdict) = q.inspect(&out, &known(&["Write"]), &recent);
+        assert!(issues.is_empty(), "got: {:?}", issues);
+        assert!(matches!(verdict, CorrectionVerdict::Ok));
+    }
+
+    #[test]
+    fn done_with_no_tools_available_is_not_premature() {
+        // No tools registered → "Done." with no calls is fine.
+        let mut q = QualityMonitor::new(2);
+        let out = ParseOutcome {
+            text: "Done.".into(),
+            thinking: String::new(),
+            tool_calls: vec![],
+            steer_reasons: vec![],
+        };
+        let (issues, _) = q.inspect(&out, &HashSet::new(), &RecentCalls::default());
+        assert!(issues.is_empty(), "got: {:?}", issues);
     }
 
     #[test]

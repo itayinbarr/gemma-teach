@@ -23,7 +23,6 @@
 //! `--notebook` defaults to a fresh tempdir if omitted. `--out` defaults to
 //! `traces/<flow>.jsonl`.
 
-use chrono::NaiveDate;
 use gt_core::backend::LlmBackend;
 use gt_core::tool::ToolRegistry;
 use gt_flows::orchestrator::Orchestrator;
@@ -184,7 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register(Arc::new(gt_tools::WriteTool))
         .register(Arc::new(gt_tools::EditTool));
 
-    let date = NaiveDate::from_ymd_opt(2026, 5, 15).unwrap();
+    let date = chrono::Local::now().date_naive();
     let templates = templates_dir();
     let (flow, ctx): (Flow, FlowCtx) = match cmd {
         Cmd::StudentAdd { name, description } => {

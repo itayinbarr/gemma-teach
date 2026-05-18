@@ -343,32 +343,32 @@ impl AgentStepFactory for PlanClassNotes {
         let source = std::fs::read_to_string(dir.join(SOURCE_TXT_FILENAME))
             .unwrap_or_else(|_| "(source.txt not found)".into());
         let task = format!(
-            r#"Read the source below. Write the file `{CLASS_NOTES_PLAN_FILENAME}` — a tiny plan file: a title and {CLASS_NOTES_CONCEPT_COUNT} concept names.
+            r#"You will write the file `{CLASS_NOTES_PLAN_FILENAME}` by calling the Write tool. Do NOT reply "Done." before calling Write — the file must exist first.
 
-The file must follow EXACTLY this shape:
+The file body has these sections, indented here for clarity (the file itself is not indented):
 
-```
-# Class-notes plan
+    # Class-notes plan
 
-## Title
-<a short title for the chapter, inferred from the source>
+    ## Title
+    <a short title for the chapter, inferred from the source>
 
-## Concepts
-- concept: <name of concept 1>
-- concept: <name of concept 2>
-- concept: <name of concept 3>
-```
+    ## Concepts
+    - concept: <name of concept 1>
+    - concept: <name of concept 2>
+    - concept: <name of concept 3>
 
 Rules:
-  • Exactly {CLASS_NOTES_CONCEPT_COUNT} concepts. Concept names are short, distinct, and named directly in the source (e.g. "Equivalent Fractions", "Ratios", "Chloroplasts").
-  • Replace every `<…>` placeholder with real content.
-  • No prose, no extra sections, no JSON.
+  - Exactly {CLASS_NOTES_CONCEPT_COUNT} concepts. Concept names are short, distinct, and named directly in the source (e.g. "Equivalent Fractions", "Ratios", "Chloroplasts").
+  - Replace every <...> placeholder with real content drawn from the source.
+  - No prose, no extra sections, no JSON.
 
-After Write succeeds, reply: Done.
+The source you must read:
 
 --- source.txt ---
 {source}
---- end of source.txt ---"#
+--- end of source.txt ---
+
+Now call Write with the filled-in content."#
         );
         SessionBuilder::new("plan-class-notes", dir)
             .system_prompt(ONE_SHOT_WRITE_SYSTEM)
@@ -539,29 +539,31 @@ impl AgentStepFactory for SummarizeConcept {
         let n = self.n;
         let filename = concept_filename(n);
         let task = format!(
-            r#"Write the file `{filename}`. ONE concept only: "{concept}". Summarize the SOURCE below into a 2-4 bullet block about this one concept.
+            r#"You will write the file `{filename}` by calling the Write tool. Do NOT reply "Done." before calling Write — the file must exist first.
 
-The file content must follow EXACTLY this shape (no other lines):
+The file is ONE concept only: "{concept}". Summarize the SOURCE below into a 2-4 bullet block about this one concept.
 
-```
-### {concept}
-- <bullet 1>
-- <bullet 2>
-- <bullet 3 — optional>
-- <bullet 4 — optional>
-```
+The file body has this shape, indented here for clarity (the file itself is not indented):
+
+    ### {concept}
+    - <bullet 1>
+    - <bullet 2>
+    - <bullet 3, optional>
+    - <bullet 4, optional>
 
 Rules:
-  • 2-4 bullets. Each bullet a complete sentence, concrete, grounded in the source.
-  • At least one bullet must include a NAMED entity or NUMERICAL value taken directly from the source (e.g. "3/4", "6:2", "75%"). Do not paraphrase the numbers.
-  • Heading is exactly `### {concept}` — same casing as given, three hashes, no extra punctuation. Do not use one or two hashes.
-  • Do not write about anything other than "{concept}".
+  - 2-4 bullets. Each bullet a complete sentence, concrete, grounded in the source.
+  - At least one bullet must include a NAMED entity or NUMERICAL value taken directly from the source (e.g. "3/4", "6:2", "75%"). Do not paraphrase the numbers.
+  - Heading is exactly `### {concept}` — same casing as given, three hashes, no extra punctuation.
+  - Do not write about anything other than "{concept}".
 
-After Write succeeds, reply: Done.
+The source you must read:
 
 --- source.txt ---
 {source}
---- end of source.txt ---"#,
+--- end of source.txt ---
+
+Now call Write with the filled-in content."#,
         );
         SessionBuilder::new(format!("summarize-concept-{n}"), dir)
             .system_prompt(ONE_SHOT_WRITE_SYSTEM)
@@ -587,29 +589,31 @@ impl AgentStepFactory for WriteObjectives {
         let source = read_source(ctx);
         let concepts = plan.concepts.join(", ");
         let task = format!(
-            r#"Write the file `{OBJECTIVES_FILENAME}`. Just the Learning objectives section for a chapter whose concepts are: {concepts}.
+            r#"You will write the file `{OBJECTIVES_FILENAME}` by calling the Write tool. Do NOT reply "Done." before calling Write — the file must exist first.
 
-The file content must follow EXACTLY this shape (no other lines):
+The file is just the Learning objectives section for a chapter whose concepts are: {concepts}.
 
-```
-## Learning objectives
-- <verb> <objective 1>
-- <verb> <objective 2>
-- <verb> <objective 3>
-- <verb> <objective 4 — optional>
-- <verb> <objective 5 — optional>
-```
+The file body has this shape, indented here for clarity (the file itself is not indented):
+
+    ## Learning objectives
+    - <verb> <objective 1>
+    - <verb> <objective 2>
+    - <verb> <objective 3>
+    - <verb> <objective 4, optional>
+    - <verb> <objective 5, optional>
 
 Rules:
-  • 3-5 bullets. Each starts with a present-tense verb: identify, explain, apply, contrast, predict, compare, compute, simplify.
-  • Each objective references one of the concepts above by name where natural.
-  • One sentence per bullet, no sub-bullets.
+  - 3-5 bullets. Each starts with a present-tense verb: identify, explain, apply, contrast, predict, compare, compute, simplify.
+  - Each objective references one of the concepts above by name where natural.
+  - One sentence per bullet, no sub-bullets.
 
-After Write succeeds, reply: Done.
+The source you must read:
 
 --- source.txt ---
 {source}
---- end of source.txt ---"#
+--- end of source.txt ---
+
+Now call Write with the filled-in content."#
         );
         SessionBuilder::new("write-class-notes-objectives", dir)
             .system_prompt(ONE_SHOT_WRITE_SYSTEM)
@@ -632,25 +636,27 @@ impl AgentStepFactory for WriteWorkedExample {
         let source = read_source(ctx);
         let concepts = plan.concepts.join(", ");
         let task = format!(
-            r#"Write the file `{WORKED_EXAMPLE_FILENAME}`. Just the Worked example section for a chapter whose concepts are: {concepts}.
+            r#"You will write the file `{WORKED_EXAMPLE_FILENAME}` by calling the Write tool. Do NOT reply "Done." before calling Write — the file must exist first.
 
-The file content must follow EXACTLY this shape (no other lines):
+The file is just the Worked example section for a chapter whose concepts are: {concepts}.
 
-```
-## Worked example
-- <one concrete worked example, 1-3 sentences>
-```
+The file body has this shape, indented here for clarity (the file itself is not indented):
+
+    ## Worked example
+    - <one concrete worked example, 1-3 sentences>
 
 Rules:
-  • Exactly one bullet under `## Worked example`. One bullet = one connected mini-explanation.
-  • Use a NAMED entity or NUMERICAL value pulled directly from the source — do not paraphrase the numbers.
-  • Reference at least two of the concepts above by name inside the bullet.
+  - Exactly one bullet under `## Worked example`. One bullet = one connected mini-explanation.
+  - Use a NAMED entity or NUMERICAL value pulled directly from the source — do not paraphrase the numbers.
+  - Reference at least two of the concepts above by name inside the bullet.
 
-After Write succeeds, reply: Done.
+The source you must read:
 
 --- source.txt ---
 {source}
---- end of source.txt ---"#
+--- end of source.txt ---
+
+Now call Write with the filled-in content."#
         );
         SessionBuilder::new("write-class-notes-worked-example", dir)
             .system_prompt(ONE_SHOT_WRITE_SYSTEM)
@@ -676,28 +682,30 @@ impl AgentStepFactory for WriteMisconceptions {
         let source = read_source(ctx);
         let concepts = plan.concepts.join(", ");
         let task = format!(
-            r#"Write the file `{MISCONCEPTIONS_FILENAME}`. Just the Common misconceptions section for a chapter whose concepts are: {concepts}.
+            r#"You will write the file `{MISCONCEPTIONS_FILENAME}` by calling the Write tool. Do NOT reply "Done." before calling Write — the file must exist first.
 
-The file content must follow EXACTLY this shape (no other lines):
+The file is just the Common misconceptions section for a chapter whose concepts are: {concepts}.
 
-```
-## Common misconceptions
-- <misconception 1>
-- <misconception 2>
-- <misconception 3 — optional>
-- <misconception 4 — optional>
-```
+The file body has this shape, indented here for clarity (the file itself is not indented):
+
+    ## Common misconceptions
+    - <misconception 1>
+    - <misconception 2>
+    - <misconception 3, optional>
+    - <misconception 4, optional>
 
 Rules:
-  • 2-4 bullets. Each is a single sentence stating a wrong belief students commonly hold about one of the concepts above.
-  • Phrase the bullet AS the wrong belief itself, not as a correction. The teacher will use these to pre-empt errors.
-  • Each misconception must be grounded in the source (it should be a wrong reading of something the chapter actually says).
+  - 2-4 bullets. Each is a single sentence stating a wrong belief students commonly hold about one of the concepts above.
+  - Phrase the bullet AS the wrong belief itself, not as a correction. The teacher will use these to pre-empt errors.
+  - Each misconception must be grounded in the source (it should be a wrong reading of something the chapter actually says).
 
-After Write succeeds, reply: Done.
+The source you must read:
 
 --- source.txt ---
 {source}
---- end of source.txt ---"#
+--- end of source.txt ---
+
+Now call Write with the filled-in content."#
         );
         SessionBuilder::new("write-class-notes-misconceptions", dir)
             .system_prompt(ONE_SHOT_WRITE_SYSTEM)
@@ -884,39 +892,68 @@ impl AgentStepFactory for WriteHomework {
     fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
         let dir = lesson_dir(ctx);
         let class_notes = std::fs::read_to_string(dir.join(CLASS_NOTES_FILENAME))
-            .unwrap_or_else(|_| "(class-notes.md not found)".into());
+            .unwrap_or_else(|_| String::new());
+        // Pull just the concept names + a clean title from class-notes.md.
+        // Passing the whole assembled file as context confuses Gemma 4 — it
+        // reads our title-line placeholder residue (e.g. `# <a short title ...>`)
+        // as instructions and shortcuts to "Done." every turn.
+        // Strip stray trailing punctuation while keeping original-case
+        // display ("Percentages)" → "Percentages").
+        let concept_names: Vec<String> = class_notes
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("### ").map(|c| {
+                c.trim()
+                    .trim_end_matches([')', '(', '.', ',', ':', ';', '!', '?'])
+                    .trim()
+                    .to_string()
+            }))
+            .filter(|c| !c.is_empty())
+            .collect();
+        let concept_list = if concept_names.is_empty() {
+            "(concepts not parsed from class-notes.md)".into()
+        } else {
+            concept_names
+                .iter()
+                .map(|c| format!("  - {c}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let chapter_title = class_notes
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("# ").map(|t| t.trim().to_string()))
+            .filter(|t| !t.contains('<'))
+            .unwrap_or_else(|| "today's chapter".into());
         let task = format!(
-            r#"Write today's homework based on the class-notes below.
+            r#"You will write the file `{HOMEWORK_FILENAME}` by calling the Write tool. Do NOT reply "Done." before calling Write — the file must exist first.
 
-Constraints (you, the model, must follow these — they describe how to fill in the template, do NOT include this paragraph in the file):
-  • Every numbered problem MUST end with ` (maps to: <Concept Name>)`. `<Concept Name>` is one of the `### <concept>` headings from class-notes.md, copied verbatim. A downstream validator rejects the file if any numbered line is missing this suffix.
-  • Problems grow in difficulty from 1 to 5.
-  • Replace every `<…>` placeholder below with real content. Do NOT echo the placeholder text.
+Write five practice problems for today's homework. The chapter title is: {chapter_title}
 
-Write `{HOMEWORK_FILENAME}` with EXACTLY this structure:
+Every numbered problem MUST end with ` (maps to: <Concept Name>)` where <Concept Name> is one of these concepts, copied verbatim:
 
-```
-# Homework — <same title as class-notes.md>
+{concept_list}
 
-## Practice problems
-1. <problem statement> (maps to: <concept name>)
-2. <problem statement> (maps to: <concept name>)
-3. <problem statement> (maps to: <concept name>)
-4. <problem statement> (maps to: <concept name>)
-5. <problem statement> (maps to: <concept name>)
+A downstream validator rejects the file if any numbered line is missing this suffix or names a concept not in the list above. Problems grow in difficulty from 1 to 5.
 
-## Reflection prompt
-<one open-ended question about today's lesson>
+The file body has this structure, indented here for clarity (the file itself is not indented):
 
-## Suggested time
-<a realistic number, e.g. "30 minutes">
-```
+    # Homework — {chapter_title}
 
-After Write succeeds, reply: Done.
+    ## Practice problems
+    1. <problem statement> (maps to: <concept name>)
+    2. <problem statement> (maps to: <concept name>)
+    3. <problem statement> (maps to: <concept name>)
+    4. <problem statement> (maps to: <concept name>)
+    5. <problem statement> (maps to: <concept name>)
 
---- class-notes.md ---
-{class_notes}
---- end of class-notes.md ---"#
+    ## Reflection prompt
+    <one open-ended question about today's lesson>
+
+    ## Suggested time
+    <a realistic number, e.g. "30 minutes">
+
+Replace every <...> placeholder with real content. Do NOT echo the placeholder text.
+
+Now call Write with the filled-in content."#
         );
         SessionBuilder::new("write-homework", dir)
             .system_prompt(ONE_SHOT_WRITE_SYSTEM)
@@ -1052,33 +1089,37 @@ impl AgentStepFactory for PlanTailoring {
         let _ = problem_count;
 
         let task = format!(
-            r#"Pick specific tailoring anchors for this student. Write `{TAILORING_PLAN_FILENAME}` with EXACTLY this shape (plain markdown, no JSON, no code fences inside the file):
+            r#"You will write the file `{TAILORING_PLAN_FILENAME}` by calling the Write tool. Do NOT reply "Done." before calling Write — the file must exist first.
 
-```
-# Tailoring plan
+Pick specific tailoring anchors for this student. The file is plain markdown — no JSON, no code fences inside it.
 
-## Concepts
-{concept_template}
+The file body has this shape (indented here for clarity; the file itself is NOT indented):
 
-## Worked example
-- interest: <one of the student's tags>
-- named_element: <a specific element from inside that interest>
-- scenario: <a one-line concrete situation from inside that interest that the worked example can operate on; include real numbers or named entities>
+    # Tailoring plan
 
-## Problems
-{problem_template}
-```
+    ## Concepts
+    {concept_template}
+
+    ## Worked example
+    - interest: <one of the student's tags>
+    - named_element: <a specific element from inside that interest>
+    - scenario: <a one-line concrete situation from inside that interest that the worked example can operate on; include real numbers or named entities>
+
+    ## Problems
+    {problem_template}
 
 Rules:
-  • `interest:` is one of the kebab-case tags from `tags.json` below.
-  • `named_element:` is a SPECIFIC element from inside that interest — a character, a place, a mechanic, a song, a player, a technique.
-  • `scenario:` is the load-bearing field — it must be a CONCRETE micro-situation from that interest that THE PROBLEM'S OPERATION CAN ACT ON. The downstream step uses the scenario's operands (numbers, named entities, quantities) as the operands of the rewritten problem. Examples of the shape we want:
-      – For a fractions problem with anchor 'Barcelona FC': "Barcelona scored 3 goals out of 8 shots in the first half" — gives the substituter `3` and `8` to use as numerator/denominator.
-      – For a ratios problem with anchor 'Dragon Ball Z': "Goku has a power level of 9,000 while Vegeta has 18,000" — gives the substituter the two quantities for a ratio.
-      – For a non-math concept (a process or definition) with anchor 'Minecraft': "a redstone circuit with 4 pressure plates wired in series" — gives the substituter a named mechanism.
+  - `interest:` is one of the kebab-case tags from `tags.json` below.
+  - `named_element:` is a SPECIFIC element from inside that interest — a character, a place, a mechanic, a song, a player, a technique.
+  - `scenario:` is the load-bearing field — a CONCRETE micro-situation from that interest that THE PROBLEM'S OPERATION CAN ACT ON. The downstream step uses the scenario's operands (numbers, named entities, quantities) as the operands of the rewritten problem. Shape examples:
+      - For a fractions problem with anchor 'Barcelona FC': "Barcelona scored 3 goals out of 8 shots in the first half" — gives the substituter `3` and `8` as numerator/denominator.
+      - For a ratios problem with anchor 'Dragon Ball Z': "Goku has a power level of 9,000 while Vegeta has 18,000" — gives the substituter two quantities for a ratio.
+      - For a non-math concept with anchor 'Minecraft': "a redstone circuit with 4 pressure plates wired in series" — gives the substituter a named mechanism.
     AVOID generic scenarios like "Goku is fighting" or "Barcelona is playing" — they have no operands.
-  • Pick DIFFERENT interests across the concepts when possible.
-  • Keep every `concept:` label and every `n:` number from the template above. Replace every `<…>` placeholder with real content.
+  - Pick DIFFERENT interests across the concepts when possible.
+  - Keep every `concept:` label and every `n:` number from the template. Replace every <...> placeholder with real content.
+
+The student profile and tags you must read:
 
 --- student.md ---
 {student_md}
@@ -1088,7 +1129,7 @@ Rules:
 {tags_json}
 --- end of tags.json ---
 
-After Write succeeds, reply: Done."#
+Now call Write with the filled-in content."#
         );
         SessionBuilder::new(format!("plan-tailoring-for-{}", self.slug), dir)
             .system_prompt(PLAN_TAILORING_SYSTEM)
@@ -1464,13 +1505,17 @@ impl AgentStepFactory for TailorHomeworkForStudent {
         filled_template.push_str(&tail);
 
         let task = format!(
-            r#"Write `{STUDENT_HW_FILENAME}`. The file content is below as a TEMPLATE with `<…>` slots on every numbered problem. Your job is to replace every `<…>` slot with a single concrete 1–2 sentence problem that does exactly what the slot describes — use the scenario's numbers / entities as the operands of the named operation. Leave everything outside the `<…>` slots unchanged.
+            r#"You will write the file `{STUDENT_HW_FILENAME}` by calling the Write tool. Do NOT reply "Done." before calling Write — the file must exist first.
+
+The file content is below as a TEMPLATE with <...> slots on every numbered problem. Your job is to replace every <...> slot with a single concrete 1-2 sentence problem that does exactly what the slot describes — use the scenario's numbers / entities as the operands of the named operation. Leave everything outside the <...> slots unchanged.
+
+The template you must use:
 
 --- template ---
 {filled_template}
 --- end of template ---
 
-After Write succeeds, reply: Done."#
+Now call Write with the filled-in content."#
         );
         SessionBuilder::new(format!("tailor-hw-for-{}", self.slug), dir)
             .system_prompt(TAILOR_SYSTEM)
@@ -1673,8 +1718,14 @@ impl DeterministicStep for ValidateHomeworkMapping {
                 .collect(),
             Err(_) => Vec::new(),
         };
-        let valid_lc: std::collections::HashSet<String> =
-            valid_concepts.iter().map(|c| c.to_lowercase()).collect();
+        // Normalize: strip trailing punctuation (`)`, `.`, `,`, `:`, `;`) and
+        // lowercase. Live model output sometimes emits stray punctuation on
+        // concept names (e.g. `### Percentages)`) which would otherwise cause
+        // a false mismatch against the homework's clean `(maps to: Percentages)`.
+        let valid_lc: std::collections::HashSet<String> = valid_concepts
+            .iter()
+            .map(|c| normalize_concept_name(c))
+            .collect();
 
         // Match lines like `1. ...` / `2) ...` and require the literal
         // `(maps to: …)` suffix. Trailing whitespace is tolerated.
@@ -1716,7 +1767,7 @@ impl DeterministicStep for ValidateHomeworkMapping {
             if !valid_lc.is_empty() {
                 let idx = t.rfind("(maps to:").unwrap();
                 let inside = t[idx + "(maps to:".len()..t.len() - 1].trim();
-                if !valid_lc.contains(&inside.to_lowercase()) {
+                if !valid_lc.contains(&normalize_concept_name(inside)) {
                     unknown_concept.push(format!("'{inside}' on: {t}"));
                 }
             }
@@ -1750,6 +1801,16 @@ impl DeterministicStep for ValidateHomeworkMapping {
         }
         Ok(StepOutcome::default())
     }
+}
+
+/// Strip trailing punctuation and lowercase. Used for tolerant comparison of
+/// concept names across the pipeline — live traces show the model occasionally
+/// glues a stray `)`, `.`, or `,` onto the end of a `### Concept` heading.
+fn normalize_concept_name(s: &str) -> String {
+    s.trim()
+        .trim_end_matches([')', '(', '.', ',', ':', ';', '!', '?'])
+        .trim()
+        .to_lowercase()
 }
 
 // ----- validate-tailor-divergence (deterministic) ---------------------------
