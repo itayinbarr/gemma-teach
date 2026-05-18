@@ -5,6 +5,8 @@
 >
 > Gemma Teach reimagines AI as something teachers can **shape**, **trust**, and **make their own**.
 
+## Overview
+
 A Claude Code–style harness for teachers, powered by Gemma 3n E2B, running fully on-device.
 
 Gemma Teach is to the classroom what Claude Code is to the terminal: a slash-command interface that turns a language model into a useful collaborator on a fixed pipeline of bounded, validated tasks. Teachers add students, plan lessons, and produce personalized homework without anything leaving the laptop.
