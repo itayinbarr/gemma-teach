@@ -1,8 +1,13 @@
 # Gemma Teach
+## AI teachers can use, trust, and shape.
+
+> ### Teaching is a human craft.
+>
+> Gemma Teach reimagines AI as something teachers can **shape**, **trust**, and **make their own**.
 
 A Claude Code–style harness for teachers, powered by Gemma 3n E2B, running fully on-device.
 
-Gemma Teach is to the classroom what Claude Code is to the terminal: a slash-command interface that turns a language model into a useful collaborator on a fixed pipeline of bounded, validated tasks. Teachers add students, plan lessons, and produce personalized homework without anything leaving the laptop. macOS today, iPhone next.
+Gemma Teach is to the classroom what Claude Code is to the terminal: a slash-command interface that turns a language model into a useful collaborator on a fixed pipeline of bounded, validated tasks. Teachers add students, plan lessons, and produce personalized homework without anything leaving the laptop.
 
 See `docs/whitepaper.md` for the architecture write-up and `samples/showcase/fractions-diego/` for an end-to-end run.
 
@@ -24,7 +29,7 @@ crates/
   gt-tools   Read / Write / Edit + OCR (Tesseract) + PDF (Typst) runners
   gt-flows   the three feature pipelines + orchestrator (decomposed agent steps)
   gt-tui     macOS terminal frontend (ratatui)
-  gt-ffi     uniffi-rs bindings for the future iPhone app
+  gt-ffi     uniffi-rs bindings for future native frontends
 skills/      per-tool skill cards + domain knowledge sheets
 templates/   Typst templates for PDFs
 docs/        whitepaper, decomposition spec, planning artifacts
@@ -64,4 +69,4 @@ The `record_trace` example writes every flow and session event as JSONL so trace
 
 ## Status
 
-Phase 1 (macOS TUI, all three flows end-to-end) ships in this repository. Phase 2 (iPhone via `uniffi-rs`) is scaffolded behind `gt-ffi` and ready to wire up. `docs/whitepaper.md` documents the architecture and the design choices in depth; `docs/tailor-decomposition.md` specifies the next round of per-concept micro-decomposition that would unlock tailored class-notes.
+Phase 1 (macOS TUI, all three flows end-to-end) ships in this repository. Phase 2 (native frontends via `uniffi-rs`) is scaffolded behind `gt-ffi` and ready to wire up. `docs/whitepaper.md` documents the architecture and the design choices in depth; `docs/tailor-decomposition.md` specifies the next round of per-concept micro-decomposition that would unlock tailored class-notes.
