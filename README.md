@@ -23,6 +23,45 @@ Frontier LLMs are powerful but require sending student-identifying data to a rem
 - `/class-plan <chapter>` — OCR a textbook chapter (PDF) or load a `.txt`, draft a master class-notes sheet and a master homework with deterministic concept-to-problem mapping, then for each student in the notebook plan a per-student tailoring of named anchors and rewrite the homework around those anchors. Compile everything to PDF via Typst.
 - `/student-edit <name>` — apply targeted edits to a student's profile via the `Edit` tool, then regenerate `tags.json` from the updated profile.
 
+## How to Contribute
+
+**You do not need to be a programmer to add features to Gemma Teach.** This project is meant to be shaped by the teachers who use it — and modern AI coding tools make that genuinely possible.
+
+The approach is called **"vibe coding"**: instead of writing code yourself, you describe — in plain English — what you want the software to do, and an AI coding assistant writes and changes the code for you. You stay in the role you know best: deciding *what* the tool should do for your classroom. The AI handles the *how*.
+
+### What you'll need (one-time setup)
+
+1. **An AI coding assistant.** Either works:
+   - **[Claude Code](https://docs.claude.com/en/docs/claude-code/overview)** — Anthropic's assistant (this project was built with it).
+   - **[OpenAI Codex](https://developers.openai.com/codex/)** — OpenAI's equivalent.
+2. **Git and GitHub** — the system that tracks changes and lets you share them back. GitHub's [Hello World guide](https://docs.github.com/en/get-started/start-your-journey/hello-world) walks you through it from zero.
+3. A copy of this project on your computer (your assistant can do this step for you — just ask it to "clone the Gemma Teach repository").
+
+### How to add a feature
+
+1. Open the project folder in your AI coding assistant.
+2. Describe the change you want in plain language. Be specific about the classroom outcome — the assistant will ask follow-up questions if it needs them.
+3. Let it make the changes, then try them out by running the app (`cargo run -p gt-tui`).
+4. When you're happy, ask the assistant to help you *commit* the change and *open a pull request* — that's how you propose it back to the project so other teachers get it too.
+
+### Example prompt
+
+Paste something like this into Claude Code or Codex:
+
+> I'm a teacher using Gemma Teach. I want a new `/reading-level` slash command that takes a piece of text and rewrites it at a chosen grade level (for example, "grade 3" or "grade 7"), then saves the result as a PDF — the same way `/class-plan` produces PDFs. Please look at how the existing flows in `gt-flows` and the slash commands are built, follow the same patterns (a bounded agent step, a deterministic parser, and a validator), and add tests. Walk me through what you're doing in plain English as you go.
+
+The assistant will explore the code, follow the existing structure, and explain each step. If something breaks, paste the error message back to it and ask it to fix it — that back-and-forth *is* the workflow.
+
+### Learn more
+
+- **Vibe coding, explained** — [a beginner's intro](https://www.freecodecamp.org/news/what-is-vibe-coding/) to building software by describing it.
+- **Claude Code** — [getting started guide](https://docs.claude.com/en/docs/claude-code/quickstart).
+- **OpenAI Codex** — [getting started guide](https://developers.openai.com/codex/quickstart/).
+- **Git & GitHub for absolute beginners** — [GitHub's Hello World](https://docs.github.com/en/get-started/start-your-journey/hello-world) and [the official Git tutorial](https://git-scm.com/docs/gittutorial).
+- **Pull requests** — [how to propose your change back](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/about-pull-requests).
+
+Don't worry about breaking anything — every change is reviewed before it ships, and Git keeps a full history you can always roll back to. Start small, stay curious, and make this tool your own.
+
 ## Architecture (workspace)
 
 ```
