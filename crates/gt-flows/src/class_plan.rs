@@ -1805,6 +1805,39 @@ impl DeterministicStep for ValidateHomeworkMapping {
     }
 }
 
+/// Strip `<…>` placeholder residue that the model sometimes echoes verbatim
+/// into a title, then collapse leftover whitespace. Without this, Typst
+/// rejects the rendered class-notes.md with "unclosed label" because it
+/// interprets `<…>` as label syntax. Falls back to a generic placeholder if
+/// nothing usable remains.
+fn sanitize_title(raw: &str) -> String {
+    let mut s = String::with_capacity(raw.len());
+    let mut in_angle = false;
+    for ch in raw.chars() {
+        if ch == '<' {
+            in_angle = true;
+            continue;
+        }
+        if ch == '>' {
+            in_angle = false;
+            continue;
+        }
+        if !in_angle {
+            s.push(ch);
+        }
+    }
+    // Collapse runs of whitespace to a single space, trim surrounding
+    // whitespace and stray brackets/punctuation.
+    let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed
+        .trim_matches(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']'));
+    if trimmed.is_empty() {
+        "Today's lesson".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Strip trailing punctuation and lowercase. Used for tolerant comparison of
 /// concept names across the pipeline — live traces show the model occasionally
 /// glues a stray `)`, `.`, or `,` onto the end of a `### Concept` heading.
