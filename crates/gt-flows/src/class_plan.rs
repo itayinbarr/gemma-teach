@@ -330,8 +330,10 @@ How to use tools:
     ```tool_code
     Write(path="<the path given in your task>", content="<the content described in your task>")
     ```
+    Done.
   - The `path` argument MUST be the exact filename named in your task. Do not invent a different filename.
-  - One Write call is enough for this task. After Write succeeds, reply exactly: Done.
+  - Output exactly ONE Write call inside a `tool_code` fence. After the closing ``` of the fence, emit a new line containing only: Done.
+  - Do NOT emit any other tool call. Do NOT "verify" the file by reading it back. After "Done." output nothing more.
 "##;
 
 // ---- Step 3a: plan-class-notes (small, structured) ------------------------
@@ -863,7 +865,7 @@ impl DeterministicStep for AssembleClassNotes {
 
         let mut out = String::new();
         out.push_str("# ");
-        out.push_str(plan.title.trim());
+        out.push_str(&sanitize_title(&plan.title));
         out.push_str("\n\n## Learning objectives\n");
         out.push_str(objectives_body.trim_end());
         out.push_str("\n\n## Key concepts\n");
