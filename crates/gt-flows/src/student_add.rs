@@ -176,7 +176,7 @@ Call Write once with the filled-in content. After Write succeeds, reply: Done."#
             .system_prompt(WRITE_STUDENT_SYSTEM)
             .task_prompt(task)
             .allowed_tools(["Write"])
-            .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
+            .model_profile(gt_core::ModelProfile::gemma_4_e2b())
     }
 
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
@@ -231,7 +231,7 @@ After Write succeeds, reply: Done.
             .system_prompt(EXTRACT_TAGS_SYSTEM)
             .task_prompt(task)
             .allowed_tools(["Write"])
-            .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
+            .model_profile(gt_core::ModelProfile::gemma_4_e2b())
     }
 
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
@@ -255,7 +255,7 @@ impl DeterministicStep for ValidateTags {
             })?;
 
         // Try the strict parse first; on failure, run it through the parser's
-        // repair pipeline. Gemma 3n has been observed writing a tags.json file
+        // repair pipeline. The model has been observed writing a tags.json file
         // whose contents are pre-escaped (`[\"a\", \"b\"]` literally on disk)
         // — `try_repair_json_value` strips one layer of escaping and re-parses.
         let parsed: Vec<String> = match serde_json::from_str(&text) {

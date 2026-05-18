@@ -10,7 +10,7 @@
 //!
 //! Single-step pattern throughout: each agent session receives the full prior
 //! content in its task prompt and emits exactly one Write call. Multi-step
-//! "Read then Edit/Write" dances are not reliable on Gemma 3n E2B.
+//! "Read then Edit/Write" dances are not reliable on Gemma 4 E2B.
 
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -143,7 +143,7 @@ After Write succeeds, reply: Done.
             .system_prompt(REWRITE_SYSTEM)
             .task_prompt(task)
             .allowed_tools(["Write"])
-            .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
+            .model_profile(gt_core::ModelProfile::gemma_4_e2b())
     }
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
         vec![("student_md".into(), PathBuf::from(STUDENT_MD_FILENAME))]
@@ -214,7 +214,7 @@ After Write succeeds, reply: Done.
             .system_prompt(REFRESH_SYSTEM)
             .task_prompt(task)
             .allowed_tools(["Write"])
-            .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
+            .model_profile(gt_core::ModelProfile::gemma_4_e2b())
     }
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
         vec![("tags_json".into(), PathBuf::from(TAGS_JSON_FILENAME))]

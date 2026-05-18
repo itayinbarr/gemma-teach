@@ -40,11 +40,11 @@ pub struct FetchSpec {
 }
 
 impl FetchSpec {
-    pub fn gemma_3n_e2b_q4km(default_dir: &Path) -> Self {
+    pub fn gemma_4_e2b_q4km(default_dir: &Path) -> Self {
         Self {
-            url: "https://huggingface.co/unsloth/gemma-3n-E2B-it-GGUF/resolve/main/gemma-3n-E2B-it-Q4_K_M.gguf"
+            url: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf"
                 .into(),
-            dest: default_dir.join("gemma-3n-E2B-it-Q4_K_M.gguf"),
+            dest: default_dir.join("gemma-4-E2B-it-Q4_K_M.gguf"),
             expected_sha256: None,
         }
     }

@@ -7,7 +7,7 @@
 
 ## Overview
 
-A Claude Code–style harness for teachers, powered by Gemma 3n E2B, running fully on-device.
+A Claude Code–style harness for teachers, powered by Gemma 4 E2B, running fully on-device.
 
 Gemma Teach is to the classroom what Claude Code is to the terminal: a slash-command interface that turns a language model into a useful collaborator on a fixed pipeline of bounded, validated tasks. Teachers add students, plan lessons, and produce personalized homework without anything leaving the laptop.
 
@@ -15,7 +15,7 @@ See `docs/whitepaper.md` for the architecture write-up and `samples/showcase/fra
 
 ## Why this exists
 
-Frontier LLMs are powerful but require sending student-identifying data to a remote API — a non-starter under most schools' privacy expectations. Small local models exist, but the agentic scaffolds designed for frontier models break on a 2 B-parameter model. Gemma Teach inverts that: it ships a scaffold designed *for* Gemma 3n E2B. Each agent session does one small bounded thing, every model output is parsed by a quirk-aware deterministic parser, every step is followed by a validator that enforces the prompt contract. The result is a system you can trust to produce a printable PDF.
+Frontier LLMs are powerful but require sending student-identifying data to a remote API — a non-starter under most schools' privacy expectations. Small local models exist, but the agentic scaffolds designed for frontier models break on a 2 B-parameter model. Gemma Teach inverts that: it ships a scaffold designed *for* Gemma 4 E2B. Each agent session does one small bounded thing, every model output is parsed by a quirk-aware deterministic parser, every step is followed by a validator that enforces the prompt contract. The result is a system you can trust to produce a printable PDF.
 
 ## Features
 
@@ -89,14 +89,14 @@ samples/     showcase: end-to-end inputs and outputs
 ## Quick start
 
 ```sh
-cargo run -p gt-tui                  # launches the TUI; on first run, downloads ~3.5 GB Gemma 3n E2B
+cargo run -p gt-tui                  # launches the TUI; on first run, downloads ~3.1 GB Gemma 4 E2B
 ```
 
 Notebook lives at `~/GemmaTeach/`. Model cache at `~/.gemma-teach/models/`. Logs at `~/.gemma-teach/logs/gemma-teach-<date>.log` — `tail -f` that file for inference progress while the TUI is open.
 
 ## Showcase
 
-`samples/showcase/fractions-diego/` contains a complete end-to-end run against the real Gemma 3n model: a math chapter on fractions and ratios, a 6th-grade Barcelona-FC obsessed student profile for "Diego," the master class-notes PDF and master homework PDF that apply to the whole class, the tailoring plan the system picks for Diego specifically (Barcelona match scores, Dragon Ball Z power levels), and Diego's personalized homework PDF where the math problems are reformulated so the named-interest scenarios supply the numerical operands — *"Barcelona scored 2 goals out of 3 shots in the first half. What is the fraction of goals scored compared to the number of shots taken?"* in place of *"Find an equivalent fraction for 2/3."* Files are numbered in the order the pipeline produced them.
+`samples/showcase/fractions-diego/` contains a complete end-to-end run against the real Gemma 4 model: a math chapter on fractions and ratios, a 6th-grade Barcelona-FC obsessed student profile for "Diego," the master class-notes PDF and master homework PDF that apply to the whole class, the tailoring plan the system picks for Diego specifically (Barcelona match scores, Dragon Ball Z power levels), and Diego's personalized homework PDF where the math problems are reformulated so the named-interest scenarios supply the numerical operands — *"Barcelona scored 2 goals out of 3 shots in the first half. What is the fraction of goals scored compared to the number of shots taken?"* in place of *"Find an equivalent fraction for 2/3."* Files are numbered in the order the pipeline produced them.
 
 ## Testing
 

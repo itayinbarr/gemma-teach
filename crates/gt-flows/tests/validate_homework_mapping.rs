@@ -33,25 +33,37 @@ async fn run_with_homework(homework_md: &str) -> Result<(), gt_flows::step::Flow
     let pdf = Arc::new(MockPdfRunner);
 
     let backend = Arc::new(MockBackend::new());
-    let class_notes = "# Photosynthesis\n## Learning objectives\n- Identify chloroplasts.\n## Key concepts\n### Light reaction\n- bullet\n## Worked example\n- One.\n## Common misconceptions\n- Plants don't 'eat' soil.\n";
-    backend.push(
-        MockScript::new()
-            .text("Done.")
-            .tool(
-                "Write",
-                serde_json::json!({"path":"class-notes.md","content":class_notes}),
-            )
-            .done(StopReason::Eos),
-    );
-    backend.push(
-        MockScript::new()
-            .text("Done.")
-            .tool(
-                "Write",
-                serde_json::json!({"path":"homework.md","content":homework_md}),
-            )
-            .done(StopReason::Eos),
-    );
+    // The decomposed class-notes pipeline expects one mock script per part.
+    // The deterministic assembler then writes `class-notes.md`, so the
+    // validator that follows still has a real class-notes file to read
+    // its `### <concept>` headings from.
+    let plan = "## Title\nPhotosynthesis\n\n## Concepts\n- concept: Light reaction\n- concept: Calvin cycle\n- concept: Chloroplasts\n";
+    let concept_1 = "### Light reaction\n- Splits water.\n- Produces ATP and NADPH.\n";
+    let concept_2 = "### Calvin cycle\n- Fixes CO2 into G3P.\n- Uses RuBisCO.\n";
+    let concept_3 = "### Chloroplasts\n- Where photosynthesis happens.\n- Have grana.\n";
+    let objectives = "## Learning objectives\n- Identify chloroplasts.\n- Explain the light reaction.\n- Apply the photosynthesis equation.\n";
+    let worked = "## Worked example\n- A chloroplast captures 6 photons via the Light reaction, feeding ATP and NADPH into the Calvin cycle.\n";
+    let misc = "## Common misconceptions\n- Plants eat soil.\n- The Calvin cycle needs sunlight directly.\n";
+    for (path, content) in [
+        ("class-notes-plan.md", plan),
+        ("concept-1.md", concept_1),
+        ("concept-2.md", concept_2),
+        ("concept-3.md", concept_3),
+        ("objectives.md", objectives),
+        ("worked-example.md", worked),
+        ("misconceptions.md", misc),
+        ("homework.md", homework_md),
+    ] {
+        backend.push(
+            MockScript::new()
+                .text("Done.")
+                .tool(
+                    "Write",
+                    serde_json::json!({"path":path,"content":content}),
+                )
+                .done(StopReason::Eos),
+        );
+    }
 
     let templates_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -132,7 +144,7 @@ async fn validator_handles_two_digit_problems() {
 async fn validator_rejects_unknown_concept() {
     // class-notes has `### Light reaction`. The homework cites `Photolysis`,
     // which is not in class-notes — the validator must reject it. This locks
-    // the live failure mode where Gemma 3n invented a new concept name in
+    // the live failure mode where the model invented a new concept name in
     // the tailored homework, causing the topic to drift.
     let hw = "# Homework\n## Practice problems\n1. one (maps to: Photolysis)\n2. two (maps to: Light reaction)\n3. three (maps to: Light reaction)\n4. four (maps to: Light reaction)\n5. five (maps to: Light reaction)\n## Reflection prompt\nWhy?\n";
     let res = run_with_homework(hw).await;

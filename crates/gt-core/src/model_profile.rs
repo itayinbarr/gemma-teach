@@ -15,10 +15,10 @@ pub struct ModelProfile {
 }
 
 impl ModelProfile {
-    /// Defaults tuned for Gemma 3n E2B (small, ~2B effective parameters).
-    pub fn gemma_3n_e2b() -> Self {
+    /// Defaults tuned for Gemma 4 E2B (small, ~2 B effective parameters).
+    pub fn gemma_4_e2b() -> Self {
         Self {
-            name: "gemma-3n-E2B-it-Q4_K_M".into(),
+            name: "gemma-4-E2B-it-Q4_K_M".into(),
             context_window: 8192,
             max_tokens: 1024,
             thinking_budget: 1024,
@@ -48,6 +48,6 @@ impl ModelProfile {
 
 impl Default for ModelProfile {
     fn default() -> Self {
-        Self::gemma_3n_e2b()
+        Self::gemma_4_e2b()
     }
 }

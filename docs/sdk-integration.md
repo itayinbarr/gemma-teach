@@ -65,7 +65,7 @@ chrono   = "0.4"
 | `model-fetch`   | `reqwest`, `sha2` | First-launch model download + SHA-256 verification. |
 
 Without `backend-llama` you can still build and run flows against `MockBackend` /
-`EchoBackend` — useful for tests and CI where you don't want a 3.5 GB model.
+`EchoBackend` — useful for tests and CI where you don't want a 3.1 GB model.
 
 ## 2. Build a backend
 
@@ -76,7 +76,7 @@ use std::sync::Arc;
 use gt_core::backend::LlmBackend;
 use gt_core::llama_backend::{LlamaCppBackend, LlamaConfig};
 
-let model_path = "/path/to/gemma-3n-E2B-it-Q4_K_M.gguf".into();
+let model_path = "/path/to/gemma-4-E2B-it-Q4_K_M.gguf".into();
 let backend: Arc<dyn LlmBackend> =
     Arc::new(LlamaCppBackend::new(LlamaConfig::new(model_path)));
 ```
@@ -91,7 +91,7 @@ To download the model on first launch (with the `model-fetch` feature):
 use gt_core::model_fetch::{default_models_dir, fetch, FetchSpec};
 
 let dir  = default_models_dir();          // ~/.gemma-teach/models
-let spec = FetchSpec::gemma_3n_e2b_q4km(&dir);
+let spec = FetchSpec::gemma_4_e2b_q4km(&dir);
 fetch(spec, None).await?;                 // pass Some(mpsc::Sender) for progress events
 ```
 
@@ -181,7 +181,7 @@ let (flow, ctx) = flow_with_ctx_from_source(
 
 // Per-student tailoring sessions run in a parallel group; cap concurrency here.
 let handle = Orchestrator::new(backend.clone(), tools.clone())
-    .with_parallelism(1)   // Gemma 3n on Metal uses the whole GPU per inference
+    .with_parallelism(1)   // Gemma 4 on Metal uses the whole GPU per inference
     .start(flow, ctx);
 ```
 

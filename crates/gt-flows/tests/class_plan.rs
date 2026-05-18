@@ -30,26 +30,50 @@ async fn class_plan_end_to_end_with_mocks() {
     let pdf = Arc::new(MockPdfRunner);
 
     let backend = Arc::new(MockBackend::new());
-    let class_notes_body = "# Photosynthesis\n## Learning objectives\n- Identify chloroplasts.\n## Key concepts\n### Light reaction\n- bullet\n## Worked example\n- One.\n## Common misconceptions\n- Plants don't 'eat' soil.\n";
+    // The class-notes pipeline is now decomposed into a plan + per-part
+    // sessions assembled deterministically. Each mock script below writes
+    // one small file; assemble-class-notes (deterministic) concatenates
+    // them into `class-notes.md`.
+    let class_notes_plan = "# Class-notes plan\n\n## Title\nPhotosynthesis\n\n## Concepts\n- concept: Light reaction\n- concept: Calvin cycle\n- concept: Chloroplasts\n";
+    let concept_1 = "### Light reaction\n- Splits water in the thylakoid membrane.\n- Produces ATP and NADPH.\n- Requires sunlight.\n";
+    let concept_2 = "### Calvin cycle\n- Runs in the stroma, doesn't need light directly.\n- Fixes CO2 into G3P using ATP and NADPH.\n- Uses the enzyme RuBisCO.\n";
+    let concept_3 = "### Chloroplasts\n- Organelles where photosynthesis takes place.\n- Contain stacks of thylakoids (grana).\n- Surrounded by a double membrane.\n";
+    let objectives = "## Learning objectives\n- Identify chloroplasts and label their parts.\n- Explain how the light reaction couples to the Calvin cycle.\n- Apply the photosynthesis equation to a worked example.\n";
+    let worked_example = "## Worked example\n- A chloroplast captures 6 photons in the light reaction, producing ATP and NADPH that feed one turn of the Calvin cycle to fix one CO2 into G3P.\n";
+    let misconceptions = "## Common misconceptions\n- Plants eat soil rather than producing food from light.\n- The Calvin cycle needs sunlight directly.\n- Only the leaves of a plant photosynthesize.\n";
     // Master homework must include the `(maps to: <Concept>)` suffix on every
-    // numbered problem — enforced by the new validate-homework-mapping step.
-    let homework_body = "# Homework — Photosynthesis\n## Practice problems\n1. one (maps to: Light reaction)\n2. two (maps to: Light reaction)\n3. three (maps to: Light reaction)\n4. four (maps to: Light reaction)\n5. five (maps to: Light reaction)\n## Reflection prompt\nWhy?\n## Suggested time\n30 minutes\n";
+    // numbered problem — enforced by the validate-homework-mapping step. The
+    // concept name in `(maps to: …)` must match one of the assembled
+    // class-notes' `### <concept>` headings.
+    let homework_body = "# Homework — Photosynthesis\n## Practice problems\n1. one (maps to: Light reaction)\n2. two (maps to: Calvin cycle)\n3. three (maps to: Chloroplasts)\n4. four (maps to: Light reaction)\n5. five (maps to: Calvin cycle)\n## Reflection prompt\nWhy?\n## Suggested time\n30 minutes\n";
 
-    // Flow steps that exercise the backend (in order):
-    //   write-class-notes       (one-shot Write)
-    //   write-homework          (one-shot Write)
-    //   plan-tailoring-for-maya (one-shot Write tailoring-plan.md)
-    //   tailor-hw-for-maya      (one-shot Write homework.md)
-    let tailoring_plan = "# Tailoring plan\n\n## Concepts\n- concept: Light reaction\n  interest: studio-ghibli\n  named_element: the kelp forest in Ponyo\n\n## Worked example\n- interest: studio-ghibli\n- named_element: the camphor tree in My Neighbor Totoro\n\n## Problems\n- n: 1\n  interest: studio-ghibli\n  named_element: Ponyo's underwater kelp\n- n: 2\n  interest: studio-ghibli\n  named_element: Spirited Away bathhouse garden\n- n: 3\n  interest: studio-ghibli\n  named_element: the Ghibli forest\n- n: 4\n  interest: studio-ghibli\n  named_element: the camphor tree in Totoro\n- n: 5\n  interest: studio-ghibli\n  named_element: a Ghibli sunset\n";
+    // Flow steps that exercise the backend, in declaration order:
+    //   plan-class-notes
+    //   summarize-concept-1
+    //   summarize-concept-2
+    //   summarize-concept-3
+    //   write-class-notes-objectives
+    //   write-class-notes-worked-example
+    //   write-class-notes-misconceptions
+    //   write-homework
+    //   plan-tailoring-for-maya
+    //   tailor-hw-for-maya
+    let tailoring_plan = "# Tailoring plan\n\n## Concepts\n- concept: Light reaction\n  interest: studio-ghibli\n  named_element: the kelp forest in Ponyo\n- concept: Calvin cycle\n  interest: studio-ghibli\n  named_element: Spirited Away's bathhouse garden\n- concept: Chloroplasts\n  interest: studio-ghibli\n  named_element: Totoro's camphor tree\n\n## Worked example\n- interest: studio-ghibli\n- named_element: the camphor tree in My Neighbor Totoro\n\n## Problems\n- n: 1\n  interest: studio-ghibli\n  named_element: Ponyo's underwater kelp\n- n: 2\n  interest: studio-ghibli\n  named_element: Spirited Away bathhouse garden\n- n: 3\n  interest: studio-ghibli\n  named_element: the Ghibli forest\n- n: 4\n  interest: studio-ghibli\n  named_element: the camphor tree in Totoro\n- n: 5\n  interest: studio-ghibli\n  named_element: a Ghibli sunset\n";
     for (path, content) in [
-        ("class-notes.md", class_notes_body),
+        ("class-notes-plan.md", class_notes_plan),
+        ("concept-1.md", concept_1),
+        ("concept-2.md", concept_2),
+        ("concept-3.md", concept_3),
+        ("objectives.md", objectives),
+        ("worked-example.md", worked_example),
+        ("misconceptions.md", misconceptions),
         ("homework.md", homework_body),
         ("tailoring-plan.md", tailoring_plan),
         (
             "homework.md",
             // Tailored body must diverge enough from the master to clear the
             // validate-tailor-divergence step (30 % of body lines must be new).
-            "# Homework — Photosynthesis\n## Practice problems\n1. Maya — explain how Ponyo's underwater plants would handle blue-light filtering. (maps to: Light reaction)\n2. Sketch a leaf in Spirited Away's bathhouse garden and label its chloroplasts. (maps to: Light reaction)\n3. Compare a Ghibli forest to a real chloroplast in three short bullets. (maps to: Light reaction)\n4. Predict what Totoro's giant camphor tree does at night, in terms of photosynthesis. (maps to: Light reaction)\n5. Identify three pigments other than chlorophyll using the colors in a Ghibli sunset. (maps to: Light reaction)\n## Reflection prompt\nIf My Neighbor Totoro shifted to winter, what slows down for the camphor tree?\n## Suggested time\n25 minutes\n",
+            "# Homework — Photosynthesis\n## Practice problems\n1. Maya — explain how Ponyo's underwater plants would handle blue-light filtering. (maps to: Light reaction)\n2. Sketch a leaf in Spirited Away's bathhouse garden and label its chloroplasts. (maps to: Calvin cycle)\n3. Compare a Ghibli forest to a real chloroplast in three short bullets. (maps to: Chloroplasts)\n4. Predict what Totoro's giant camphor tree does at night, in terms of photosynthesis. (maps to: Light reaction)\n5. Identify three pigments other than chlorophyll using the colors in a Ghibli sunset. (maps to: Calvin cycle)\n## Reflection prompt\nIf My Neighbor Totoro shifted to winter, what slows down for the camphor tree?\n## Suggested time\n25 minutes\n",
         ),
     ] {
         backend.push(
@@ -101,7 +125,32 @@ async fn class_plan_end_to_end_with_mocks() {
 
     let lesson = root.join("lessons/2026-05-15");
     assert!(lesson.join("source.txt").exists());
+    // The decomposed pipeline writes the per-part files first; the assembler
+    // concatenates them into class-notes.md.
+    assert!(lesson.join("class-notes-plan.md").exists());
+    assert!(lesson.join("concept-1.md").exists());
+    assert!(lesson.join("concept-2.md").exists());
+    assert!(lesson.join("concept-3.md").exists());
+    assert!(lesson.join("objectives.md").exists());
+    assert!(lesson.join("worked-example.md").exists());
+    assert!(lesson.join("misconceptions.md").exists());
     assert!(lesson.join("class-notes.md").exists());
+    let assembled = std::fs::read_to_string(lesson.join("class-notes.md")).unwrap();
+    for needle in [
+        "# Photosynthesis",
+        "## Learning objectives",
+        "## Key concepts",
+        "### Light reaction",
+        "### Calvin cycle",
+        "### Chloroplasts",
+        "## Worked example",
+        "## Common misconceptions",
+    ] {
+        assert!(
+            assembled.contains(needle),
+            "assembled class-notes.md missing '{needle}':\n{assembled}"
+        );
+    }
     assert!(lesson.join("homework.md").exists());
     assert!(lesson.join("per-student/maya/tailoring-plan.md").exists());
     assert!(lesson.join("per-student/maya/homework.md").exists());

@@ -44,6 +44,22 @@ const CLASS_NOTES_FILENAME: &str = "class-notes.md";
 const HOMEWORK_FILENAME: &str = "homework.md";
 const STUDENT_HW_FILENAME: &str = "homework.md";
 
+// Class-notes part filenames. Each is written by a separate small agent
+// session; assemble-class-notes deterministically concatenates them into the
+// final `class-notes.md` the rest of the flow consumes. This decomposition
+// replaces the single `write-class-notes` step that consistently failed on
+// dense source material (the model would lose structure when asked to emit
+// all six sections — title, objectives, three concept blocks, worked
+// example, misconceptions — in one shot).
+const CLASS_NOTES_PLAN_FILENAME: &str = "class-notes-plan.md";
+const OBJECTIVES_FILENAME: &str = "objectives.md";
+const WORKED_EXAMPLE_FILENAME: &str = "worked-example.md";
+const MISCONCEPTIONS_FILENAME: &str = "misconceptions.md";
+fn concept_filename(n: u32) -> String {
+    format!("concept-{n}.md")
+}
+const CLASS_NOTES_CONCEPT_COUNT: u32 = 3;
+
 pub fn build_flow(
     ocr: Arc<dyn OcrRunner>,
     pdf: Arc<dyn PdfRunner>,
@@ -64,16 +80,39 @@ pub fn build_flow(
             kind: crate::step::StepKind::Deterministic(prep_step),
             parallel_group: None,
         },
-        StepNode::agent("write-class-notes", WriteClassNotes),
-        StepNode::agent("write-homework", WriteHomework),
-        StepNode::det(
-            "validate-homework-mapping",
-            ValidateHomeworkMapping {
-                path: HOMEWORK_FILENAME.into(),
-                source: HomeworkSource::Master,
-            },
-        ),
+        // ---- decomposed class-notes pipeline ----
+        // plan → validate → 3 concept summaries + objectives + worked-ex +
+        // misconceptions → deterministic assemble.
+        StepNode::agent("plan-class-notes", PlanClassNotes),
+        StepNode::det("validate-class-notes-plan", ValidateClassNotesPlan),
     ];
+    for n in 1..=CLASS_NOTES_CONCEPT_COUNT {
+        steps.push(
+            StepNode::agent(format!("summarize-concept-{n}"), SummarizeConcept { n })
+                .in_group("class-notes-parts"),
+        );
+    }
+    steps.push(
+        StepNode::agent("write-class-notes-objectives", WriteObjectives)
+            .in_group("class-notes-parts"),
+    );
+    steps.push(
+        StepNode::agent("write-class-notes-worked-example", WriteWorkedExample)
+            .in_group("class-notes-parts"),
+    );
+    steps.push(
+        StepNode::agent("write-class-notes-misconceptions", WriteMisconceptions)
+            .in_group("class-notes-parts"),
+    );
+    steps.push(StepNode::det("assemble-class-notes", AssembleClassNotes));
+    steps.push(StepNode::agent("write-homework", WriteHomework));
+    steps.push(StepNode::det(
+        "validate-homework-mapping",
+        ValidateHomeworkMapping {
+            path: HOMEWORK_FILENAME.into(),
+            source: HomeworkSource::Master,
+        },
+    ));
     // Per-student steps. We copy context deterministically into the per-student dir,
     // then run the tailor session against that dir. Tailor sessions run under the
     // parallel group "tailor" so the orchestrator's semaphore caps concurrency.
@@ -258,10 +297,28 @@ impl DeterministicStep for LoadTextSource {
     }
 }
 
-// ----- Step 3: write-class-notes -------------------------------------------
+// ----- Step 3: decomposed class-notes pipeline -----------------------------
+//
+// The single "write class-notes" task asked Gemma 4 to emit six structural
+// sections in one shot (title, objectives, three concept blocks, worked
+// example, misconceptions). On dense math source material the model
+// consistently lost structure — collapsing sections, dropping concepts,
+// echoing the prompt template, or emitting partial output that failed the
+// downstream homework mapping check because the `### <concept>` headings
+// were missing or mangled.
+//
+// The fix: scaffold-model fit. Decompose into:
+//   1) plan-class-notes — emit a small plan (title + 3 concept names)
+//   2) validate-class-notes-plan — parse the plan deterministically
+//   3) summarize-concept-N × 3 — each writes ONE `### <name>\n- bullets` file
+//   4) write-class-notes-objectives — one small file
+//   5) write-class-notes-worked-example — one small file
+//   6) write-class-notes-misconceptions — one small file
+//   7) assemble-class-notes — deterministic concatenation into class-notes.md
+// Each agent step now has a single bounded output the model can succeed at.
 
 // One-shot pattern: each session gets its inputs pre-loaded into the task
-// prompt and only needs to emit ONE Write tool call. This works with Gemma 3n's
+// prompt and only needs to emit ONE Write tool call. This works with Gemma 4's
 // single-turn strength instead of fighting it through multi-step Read+Write.
 const ONE_SHOT_WRITE_SYSTEM: &str = r##"You are a careful teaching assistant working inside a fixed working directory.
 
@@ -271,56 +328,552 @@ You can ONLY use this tool:
 How to use tools:
   - Use `tool_code` fences to call tools, e.g.:
     ```tool_code
-    Write(path="class-notes.md", content="# Title\n...")
+    Write(path="<the path given in your task>", content="<the content described in your task>")
     ```
+  - The `path` argument MUST be the exact filename named in your task. Do not invent a different filename.
   - One Write call is enough for this task. After Write succeeds, reply exactly: Done.
 "##;
 
-struct WriteClassNotes;
-impl AgentStepFactory for WriteClassNotes {
+// ---- Step 3a: plan-class-notes (small, structured) ------------------------
+
+struct PlanClassNotes;
+impl AgentStepFactory for PlanClassNotes {
     fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
         let dir = lesson_dir(ctx);
         let source = std::fs::read_to_string(dir.join(SOURCE_TXT_FILENAME))
             .unwrap_or_else(|_| "(source.txt not found)".into());
         let task = format!(
-            r#"Below is the OCR'd content of a textbook chapter. Write `{CLASS_NOTES_FILENAME}` with EXACTLY this structure:
+            r#"Read the source below. Write the file `{CLASS_NOTES_PLAN_FILENAME}` — a tiny plan file: a title and {CLASS_NOTES_CONCEPT_COUNT} concept names.
 
-# <title — infer from the source>
+The file must follow EXACTLY this shape:
 
-## Learning objectives
-- 3-5 bullets, each starting with a verb (identify, explain, apply, contrast, predict).
+```
+# Class-notes plan
 
-## Key concepts
-### <concept 1>
-- 2-4 bullets explaining it concretely.
+## Title
+<a short title for the chapter, inferred from the source>
 
-### <concept 2>
-- 2-4 bullets.
+## Concepts
+- concept: <name of concept 1>
+- concept: <name of concept 2>
+- concept: <name of concept 3>
+```
 
-### <concept 3>
-- 2-4 bullets.
+Rules:
+  • Exactly {CLASS_NOTES_CONCEPT_COUNT} concepts. Concept names are short, distinct, and named directly in the source (e.g. "Equivalent Fractions", "Ratios", "Chloroplasts").
+  • Replace every `<…>` placeholder with real content.
+  • No prose, no extra sections, no JSON.
 
-## Worked example
-- A single concrete example that uses these concepts. Pull a NAMED entity or a numerical value directly from the source — do not paraphrase. The example must reference at least two of the Key concepts by name.
-
-## Common misconceptions
-- 2-4 bullets a teacher should pre-empt.
-
-Stay strictly faithful to the source. Do not introduce material that is not in the source.
 After Write succeeds, reply: Done.
 
 --- source.txt ---
 {source}
 --- end of source.txt ---"#
         );
-        SessionBuilder::new("write-class-notes", dir)
+        SessionBuilder::new("plan-class-notes", dir)
             .system_prompt(ONE_SHOT_WRITE_SYSTEM)
             .task_prompt(task)
             .allowed_tools(["Write"])
-            .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
+            .model_profile(gt_core::ModelProfile::gemma_4_e2b())
     }
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
-        vec![(CLASS_NOTES_KEY.into(), PathBuf::from(CLASS_NOTES_FILENAME))]
+        vec![(
+            "class_notes_plan_md".into(),
+            PathBuf::from(CLASS_NOTES_PLAN_FILENAME),
+        )]
+    }
+}
+
+// ---- Step 3b: validate-class-notes-plan (deterministic) -------------------
+
+/// Plan parsed from the class-notes plan file. Two fields, both required.
+#[derive(Debug, Default, Clone)]
+pub struct ClassNotesPlan {
+    pub title: String,
+    pub concepts: Vec<String>,
+}
+
+/// Parse the markdown plan format:
+///
+/// ```text
+/// ## Title
+/// Fractions and Ratios
+///
+/// ## Concepts
+/// - concept: Equivalent Fractions
+/// - concept: Ratios
+/// - concept: Fractions
+/// ```
+///
+/// Tolerant of: missing `# Class-notes plan` heading, the model writing the
+/// title on the same line as `## Title`, indent variations, list dashes.
+pub fn parse_class_notes_plan(s: &str) -> Result<ClassNotesPlan, String> {
+    enum Sec {
+        None,
+        Title,
+        Concepts,
+    }
+    let mut sec = Sec::None;
+    let mut plan = ClassNotesPlan::default();
+    for raw in s.lines() {
+        let line = raw.trim_end();
+        let lower = line.trim().to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("## title") {
+            sec = Sec::Title;
+            // Allow inline title: "## Title: Fractions" or "## Title Fractions"
+            let inline = rest.trim_start_matches([':', ' ']).trim();
+            if !inline.is_empty() && plan.title.is_empty() {
+                // Preserve original casing from the raw line.
+                let raw_lower = line.to_ascii_lowercase();
+                let idx = raw_lower.find("## title").unwrap() + "## title".len();
+                plan.title = line[idx..].trim_start_matches([':', ' ']).trim().to_string();
+            }
+            continue;
+        }
+        if lower.starts_with("## concepts") {
+            sec = Sec::Concepts;
+            continue;
+        }
+        if lower.starts_with("## ") {
+            sec = Sec::None;
+            continue;
+        }
+        match sec {
+            Sec::None => {}
+            Sec::Title => {
+                let t = line.trim();
+                if !t.is_empty() && !t.starts_with('#') && plan.title.is_empty() {
+                    plan.title = t.to_string();
+                }
+            }
+            Sec::Concepts => {
+                let t = line.trim().trim_start_matches('-').trim();
+                if let Some(rest) = t.strip_prefix("concept:") {
+                    let name = rest.trim();
+                    if !name.is_empty() {
+                        plan.concepts.push(name.to_string());
+                    }
+                } else if !t.is_empty()
+                    && !t.starts_with('<')
+                    && !t.starts_with("- ")
+                    && line.trim_start().starts_with('-')
+                {
+                    // Fallback: model wrote `- Equivalent Fractions` without
+                    // the `concept:` key.
+                    plan.concepts.push(t.to_string());
+                }
+            }
+        }
+    }
+    if plan.title.is_empty() {
+        return Err(format!("{CLASS_NOTES_PLAN_FILENAME} is missing a title"));
+    }
+    if plan.concepts.len() < CLASS_NOTES_CONCEPT_COUNT as usize {
+        return Err(format!(
+            "{CLASS_NOTES_PLAN_FILENAME} has only {} concept(s), expected {CLASS_NOTES_CONCEPT_COUNT}",
+            plan.concepts.len()
+        ));
+    }
+    // Drop extras: downstream steps assume exactly N concepts.
+    plan.concepts.truncate(CLASS_NOTES_CONCEPT_COUNT as usize);
+    Ok(plan)
+}
+
+struct ValidateClassNotesPlan;
+#[async_trait]
+impl DeterministicStep for ValidateClassNotesPlan {
+    async fn run(&self, ctx: &FlowCtx) -> Result<StepOutcome, FlowError> {
+        let path = lesson_dir(ctx).join(CLASS_NOTES_PLAN_FILENAME);
+        let text = tokio::fs::read_to_string(&path).await.map_err(|e| FlowError::Step {
+            step: "validate-class-notes-plan".into(),
+            msg: format!("read {}: {e}", path.display()),
+        })?;
+        let plan = parse_class_notes_plan(&text).map_err(|m| FlowError::Step {
+            step: "validate-class-notes-plan".into(),
+            msg: m,
+        })?;
+        for (i, c) in plan.concepts.iter().enumerate() {
+            if c.starts_with('<') || c.eq_ignore_ascii_case("concept") {
+                return Err(FlowError::Step {
+                    step: "validate-class-notes-plan".into(),
+                    msg: format!(
+                        "{CLASS_NOTES_PLAN_FILENAME} concept #{} echoes the placeholder: '{c}'",
+                        i + 1
+                    ),
+                });
+            }
+        }
+        Ok(StepOutcome::default())
+    }
+}
+
+// ---- Helpers shared by per-part agents ------------------------------------
+
+fn read_plan_or_default(ctx: &FlowCtx) -> ClassNotesPlan {
+    let dir = lesson_dir(ctx);
+    let text = std::fs::read_to_string(dir.join(CLASS_NOTES_PLAN_FILENAME)).unwrap_or_default();
+    parse_class_notes_plan(&text).unwrap_or_default()
+}
+
+fn read_source(ctx: &FlowCtx) -> String {
+    let dir = lesson_dir(ctx);
+    std::fs::read_to_string(dir.join(SOURCE_TXT_FILENAME))
+        .unwrap_or_else(|_| "(source.txt not found)".into())
+}
+
+// ---- Step 3c: summarize-concept-N -----------------------------------------
+
+struct SummarizeConcept {
+    n: u32,
+}
+impl AgentStepFactory for SummarizeConcept {
+    fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
+        let dir = lesson_dir(ctx);
+        let plan = read_plan_or_default(ctx);
+        let source = read_source(ctx);
+        let concept = plan
+            .concepts
+            .get((self.n - 1) as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("Concept {}", self.n));
+        let n = self.n;
+        let filename = concept_filename(n);
+        let task = format!(
+            r#"Write the file `{filename}`. ONE concept only: "{concept}". Summarize the SOURCE below into a 2-4 bullet block about this one concept.
+
+The file content must follow EXACTLY this shape (no other lines):
+
+```
+### {concept}
+- <bullet 1>
+- <bullet 2>
+- <bullet 3 — optional>
+- <bullet 4 — optional>
+```
+
+Rules:
+  • 2-4 bullets. Each bullet a complete sentence, concrete, grounded in the source.
+  • At least one bullet must include a NAMED entity or NUMERICAL value taken directly from the source (e.g. "3/4", "6:2", "75%"). Do not paraphrase the numbers.
+  • Heading is exactly `### {concept}` — same casing as given, three hashes, no extra punctuation. Do not use one or two hashes.
+  • Do not write about anything other than "{concept}".
+
+After Write succeeds, reply: Done.
+
+--- source.txt ---
+{source}
+--- end of source.txt ---"#,
+        );
+        SessionBuilder::new(format!("summarize-concept-{n}"), dir)
+            .system_prompt(ONE_SHOT_WRITE_SYSTEM)
+            .task_prompt(task)
+            .allowed_tools(["Write"])
+            .model_profile(gt_core::ModelProfile::gemma_4_e2b())
+    }
+    fn output_keys(&self) -> Vec<(String, PathBuf)> {
+        vec![(
+            format!("concept_{}_md", self.n),
+            PathBuf::from(concept_filename(self.n)),
+        )]
+    }
+}
+
+// ---- Step 3d: write-class-notes-objectives --------------------------------
+
+struct WriteObjectives;
+impl AgentStepFactory for WriteObjectives {
+    fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
+        let dir = lesson_dir(ctx);
+        let plan = read_plan_or_default(ctx);
+        let source = read_source(ctx);
+        let concepts = plan.concepts.join(", ");
+        let task = format!(
+            r#"Write the file `{OBJECTIVES_FILENAME}`. Just the Learning objectives section for a chapter whose concepts are: {concepts}.
+
+The file content must follow EXACTLY this shape (no other lines):
+
+```
+## Learning objectives
+- <verb> <objective 1>
+- <verb> <objective 2>
+- <verb> <objective 3>
+- <verb> <objective 4 — optional>
+- <verb> <objective 5 — optional>
+```
+
+Rules:
+  • 3-5 bullets. Each starts with a present-tense verb: identify, explain, apply, contrast, predict, compare, compute, simplify.
+  • Each objective references one of the concepts above by name where natural.
+  • One sentence per bullet, no sub-bullets.
+
+After Write succeeds, reply: Done.
+
+--- source.txt ---
+{source}
+--- end of source.txt ---"#
+        );
+        SessionBuilder::new("write-class-notes-objectives", dir)
+            .system_prompt(ONE_SHOT_WRITE_SYSTEM)
+            .task_prompt(task)
+            .allowed_tools(["Write"])
+            .model_profile(gt_core::ModelProfile::gemma_4_e2b())
+    }
+    fn output_keys(&self) -> Vec<(String, PathBuf)> {
+        vec![("objectives_md".into(), PathBuf::from(OBJECTIVES_FILENAME))]
+    }
+}
+
+// ---- Step 3e: write-class-notes-worked-example ----------------------------
+
+struct WriteWorkedExample;
+impl AgentStepFactory for WriteWorkedExample {
+    fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
+        let dir = lesson_dir(ctx);
+        let plan = read_plan_or_default(ctx);
+        let source = read_source(ctx);
+        let concepts = plan.concepts.join(", ");
+        let task = format!(
+            r#"Write the file `{WORKED_EXAMPLE_FILENAME}`. Just the Worked example section for a chapter whose concepts are: {concepts}.
+
+The file content must follow EXACTLY this shape (no other lines):
+
+```
+## Worked example
+- <one concrete worked example, 1-3 sentences>
+```
+
+Rules:
+  • Exactly one bullet under `## Worked example`. One bullet = one connected mini-explanation.
+  • Use a NAMED entity or NUMERICAL value pulled directly from the source — do not paraphrase the numbers.
+  • Reference at least two of the concepts above by name inside the bullet.
+
+After Write succeeds, reply: Done.
+
+--- source.txt ---
+{source}
+--- end of source.txt ---"#
+        );
+        SessionBuilder::new("write-class-notes-worked-example", dir)
+            .system_prompt(ONE_SHOT_WRITE_SYSTEM)
+            .task_prompt(task)
+            .allowed_tools(["Write"])
+            .model_profile(gt_core::ModelProfile::gemma_4_e2b())
+    }
+    fn output_keys(&self) -> Vec<(String, PathBuf)> {
+        vec![(
+            "worked_example_md".into(),
+            PathBuf::from(WORKED_EXAMPLE_FILENAME),
+        )]
+    }
+}
+
+// ---- Step 3f: write-class-notes-misconceptions ----------------------------
+
+struct WriteMisconceptions;
+impl AgentStepFactory for WriteMisconceptions {
+    fn build(&self, ctx: &FlowCtx) -> SessionBuilder {
+        let dir = lesson_dir(ctx);
+        let plan = read_plan_or_default(ctx);
+        let source = read_source(ctx);
+        let concepts = plan.concepts.join(", ");
+        let task = format!(
+            r#"Write the file `{MISCONCEPTIONS_FILENAME}`. Just the Common misconceptions section for a chapter whose concepts are: {concepts}.
+
+The file content must follow EXACTLY this shape (no other lines):
+
+```
+## Common misconceptions
+- <misconception 1>
+- <misconception 2>
+- <misconception 3 — optional>
+- <misconception 4 — optional>
+```
+
+Rules:
+  • 2-4 bullets. Each is a single sentence stating a wrong belief students commonly hold about one of the concepts above.
+  • Phrase the bullet AS the wrong belief itself, not as a correction. The teacher will use these to pre-empt errors.
+  • Each misconception must be grounded in the source (it should be a wrong reading of something the chapter actually says).
+
+After Write succeeds, reply: Done.
+
+--- source.txt ---
+{source}
+--- end of source.txt ---"#
+        );
+        SessionBuilder::new("write-class-notes-misconceptions", dir)
+            .system_prompt(ONE_SHOT_WRITE_SYSTEM)
+            .task_prompt(task)
+            .allowed_tools(["Write"])
+            .model_profile(gt_core::ModelProfile::gemma_4_e2b())
+    }
+    fn output_keys(&self) -> Vec<(String, PathBuf)> {
+        vec![(
+            "misconceptions_md".into(),
+            PathBuf::from(MISCONCEPTIONS_FILENAME),
+        )]
+    }
+}
+
+// ---- Step 3g: assemble-class-notes (deterministic) ------------------------
+
+/// Reads the plan + every per-part file and writes `class-notes.md`. Tolerant
+/// of the model wrapping its output in extra prose or stray fences around the
+/// per-part section — we extract the meaningful body of each file before
+/// concatenating, and trust the plan's concept list as the source of truth
+/// for the `### <concept>` headings.
+///
+/// Matches the heading at any level: `# Worked example`, `## Worked example`,
+/// or `### Worked example` are all accepted — observed in real model
+/// output. Strips the bullets up to the next markdown heading.
+fn extract_section_body(text: &str, heading_name: &str) -> Option<String> {
+    let needle = heading_name.to_ascii_lowercase();
+    let mut found = false;
+    let mut buf = String::new();
+    for line in text.lines() {
+        let t = line.trim_end();
+        if !found {
+            let lower = t.trim().to_ascii_lowercase();
+            let stripped = lower
+                .trim_start_matches('#')
+                .trim_start();
+            if stripped == needle || stripped.starts_with(&format!("{needle}:")) {
+                found = true;
+            }
+            continue;
+        }
+        if t.trim_start().starts_with('#') {
+            break;
+        }
+        buf.push_str(t);
+        buf.push('\n');
+    }
+    if found {
+        Some(buf.trim_end_matches('\n').to_string())
+    } else {
+        None
+    }
+}
+
+/// Pull the `### <name>\n- …` block out of a per-concept file. Tolerates the
+/// model picking the wrong heading level (`# Ratios` or `## Ratios` rather
+/// than `### Ratios`), mangling casing, or omitting the heading entirely.
+/// Also normalizes leading bullets like `-\ ` (an escaped-backslash quirk
+/// observed in real model output) back to `- `.
+fn extract_concept_block(text: &str, expected_name: &str) -> String {
+    fn normalize_bullet(line: &str) -> String {
+        let t = line.trim_end();
+        let trimmed = t.trim_start();
+        // The model sometimes emits `-\ Foo` (literal backslash) instead
+        // of `- Foo` — fix it.
+        if let Some(rest) = trimmed.strip_prefix("-\\ ") {
+            return format!("- {rest}");
+        }
+        if let Some(rest) = trimmed.strip_prefix("-\\") {
+            return format!("- {}", rest.trim_start());
+        }
+        t.to_string()
+    }
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        let t = line.trim_start();
+        if t.starts_with("# ") || t.starts_with("## ") || t.starts_with("### ") {
+            // Take this heading as the concept's heading regardless of level.
+            let mut buf = String::new();
+            buf.push_str("### ");
+            buf.push_str(expected_name);
+            buf.push('\n');
+            while let Some(peek) = lines.peek() {
+                let pt = peek.trim_start();
+                if pt.starts_with("### ") || pt.starts_with("## ") || pt.starts_with("# ") {
+                    break;
+                }
+                buf.push_str(&normalize_bullet(peek));
+                buf.push('\n');
+                lines.next();
+            }
+            return buf.trim_end_matches('\n').to_string();
+        }
+    }
+    // Fallback: model forgot the heading. Treat everything as the body.
+    let mut buf = String::new();
+    buf.push_str("### ");
+    buf.push_str(expected_name);
+    buf.push('\n');
+    for line in text.lines() {
+        let t = line.trim_end();
+        if t.trim_start().starts_with('#') {
+            continue;
+        }
+        buf.push_str(&normalize_bullet(t));
+        buf.push('\n');
+    }
+    buf.trim_end_matches('\n').to_string()
+}
+
+struct AssembleClassNotes;
+#[async_trait]
+impl DeterministicStep for AssembleClassNotes {
+    async fn run(&self, ctx: &FlowCtx) -> Result<StepOutcome, FlowError> {
+        let step = "assemble-class-notes";
+        let dir = lesson_dir(ctx);
+        let plan_text = tokio::fs::read_to_string(dir.join(CLASS_NOTES_PLAN_FILENAME))
+            .await
+            .map_err(|e| FlowError::Step {
+                step: step.into(),
+                msg: format!("read {CLASS_NOTES_PLAN_FILENAME}: {e}"),
+            })?;
+        let plan = parse_class_notes_plan(&plan_text).map_err(|m| FlowError::Step {
+            step: step.into(),
+            msg: m,
+        })?;
+
+        let objectives_text =
+            tokio::fs::read_to_string(dir.join(OBJECTIVES_FILENAME)).await.unwrap_or_default();
+        let worked_text = tokio::fs::read_to_string(dir.join(WORKED_EXAMPLE_FILENAME))
+            .await
+            .unwrap_or_default();
+        let misc_text = tokio::fs::read_to_string(dir.join(MISCONCEPTIONS_FILENAME))
+            .await
+            .unwrap_or_default();
+
+        let objectives_body = extract_section_body(&objectives_text, "learning objectives")
+            .unwrap_or_else(|| objectives_text.trim().to_string());
+        let worked_body = extract_section_body(&worked_text, "worked example")
+            .unwrap_or_else(|| worked_text.trim().to_string());
+        let misc_body = extract_section_body(&misc_text, "common misconceptions")
+            .unwrap_or_else(|| misc_text.trim().to_string());
+
+        let mut concept_blocks: Vec<String> = Vec::new();
+        for (i, name) in plan.concepts.iter().enumerate() {
+            let n = (i + 1) as u32;
+            let path = dir.join(concept_filename(n));
+            let body = tokio::fs::read_to_string(&path).await.map_err(|e| FlowError::Step {
+                step: step.into(),
+                msg: format!("read {}: {e}", path.display()),
+            })?;
+            concept_blocks.push(extract_concept_block(&body, name));
+        }
+
+        let mut out = String::new();
+        out.push_str("# ");
+        out.push_str(plan.title.trim());
+        out.push_str("\n\n## Learning objectives\n");
+        out.push_str(objectives_body.trim_end());
+        out.push_str("\n\n## Key concepts\n");
+        out.push_str(&concept_blocks.join("\n\n"));
+        out.push_str("\n\n## Worked example\n");
+        out.push_str(worked_body.trim_end());
+        out.push_str("\n\n## Common misconceptions\n");
+        out.push_str(misc_body.trim_end());
+        out.push('\n');
+
+        let path = dir.join(CLASS_NOTES_FILENAME);
+        tokio::fs::write(&path, out.as_bytes()).await.map_err(|e| FlowError::Step {
+            step: step.into(),
+            msg: format!("write {}: {e}", path.display()),
+        })?;
+        Ok(StepOutcome {
+            outputs: vec![(CLASS_NOTES_KEY.into(), path)],
+        })
     }
 }
 
@@ -369,7 +922,7 @@ After Write succeeds, reply: Done.
             .system_prompt(ONE_SHOT_WRITE_SYSTEM)
             .task_prompt(task)
             .allowed_tools(["Write"])
-            .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
+            .model_profile(gt_core::ModelProfile::gemma_4_e2b())
     }
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
         vec![(HOMEWORK_KEY.into(), PathBuf::from(HOMEWORK_FILENAME))]
@@ -541,7 +1094,7 @@ After Write succeeds, reply: Done."#
             .system_prompt(PLAN_TAILORING_SYSTEM)
             .task_prompt(task)
             .allowed_tools(["Write"])
-            .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
+            .model_profile(gt_core::ModelProfile::gemma_4_e2b())
     }
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
         vec![(
@@ -827,7 +1380,7 @@ impl AgentStepFactory for TailorHomeworkForStudent {
         // model exactly how to fill in the slot using the scenario's
         // operands. There is NO master homework to fall back to — only
         // blanks the model must fill — which is the only reliable way to
-        // stop Gemma 3n from defaulting to verbatim copies.
+        // stop the model from defaulting to verbatim copies.
         let mut master_problems: Vec<(u32, String, String)> = Vec::new();
         for line in master_hw.lines() {
             let t = line.trim_start();
@@ -923,7 +1476,7 @@ After Write succeeds, reply: Done."#
             .system_prompt(TAILOR_SYSTEM)
             .task_prompt(task)
             .allowed_tools(["Write"])
-            .model_profile(gt_core::ModelProfile::gemma_3n_e2b())
+            .model_profile(gt_core::ModelProfile::gemma_4_e2b())
     }
     fn output_keys(&self) -> Vec<(String, PathBuf)> {
         vec![(
@@ -935,7 +1488,7 @@ After Write succeeds, reply: Done."#
 
 // ----- restore-hw-suffixes-<slug> (deterministic) ---------------------------
 //
-// Gemma 3n reliably drops the ` (maps to: <Concept>)` suffix from numbered
+// The model reliably drops the ` (maps to: <Concept>)` suffix from numbered
 // problems even when the prompt told it to preserve them — it treats the
 // suffix as decoration when it's busy rewriting the problem body. Rather
 // than flood the prompt with reminders, we restore the suffix here

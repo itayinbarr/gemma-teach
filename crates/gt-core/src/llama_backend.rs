@@ -3,7 +3,7 @@
 //! Loads a GGUF model lazily via `llama-cpp-2` with Metal acceleration on Apple
 //! Silicon. Streams tokens through the standard `LlmBackend::generate` contract.
 //!
-//! Tool-call detection: Gemma 3n does not expose first-class tool-call tokens,
+//! Tool-call detection: Gemma 4 does not expose first-class tool-call tokens,
 //! so this backend only emits text deltas. The session's parser is responsible
 //! for extracting tool calls from the text stream (fenced blocks, XML tags, or
 //! bare JSON — see `parser.rs`).
@@ -56,7 +56,7 @@ impl LlamaConfig {
     pub fn new(model_path: PathBuf) -> Self {
         Self {
             model_path,
-            // 32K context — Gemma 3n is small enough that KV cache at this
+            // 32K context — Gemma 4 E2B is small enough that KV cache at this
             // size is comfortable on M-series, and /class-plan tailoring
             // sessions easily pre-load 4K+ tokens of student + lesson context.
             n_ctx: 32_768,
@@ -247,7 +247,7 @@ impl LlmBackend for LlamaCppBackend {
     }
 }
 
-/// Render the chat history into a single prompt string. We use the Gemma 3n
+/// Render the chat history into a single prompt string. We use the Gemma
 /// instruction-tuned chat template: `<start_of_turn>role\n...<end_of_turn>\n`.
 fn render_chat_prompt(req: &GenerateRequest) -> String {
     let mut s = String::new();

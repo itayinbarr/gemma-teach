@@ -1,4 +1,4 @@
-//! Drive any of the three feature flows against the real Gemma 3n E2B
+//! Drive any of the three feature flows against the real Gemma 4 E2B
 //! backend and dump every event as JSONL with per-step tok/s telemetry.
 //!
 //! Examples
@@ -343,7 +343,7 @@ fn build_real_backend() -> Result<Arc<dyn LlmBackend>, Box<dyn std::error::Error
     use gt_core::model_fetch::default_models_dir;
     let path = std::env::var("GEMMA_TEACH_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| default_models_dir().join("gemma-3n-E2B-it-Q4_K_M.gguf"));
+        .unwrap_or_else(|_| default_models_dir().join("gemma-4-E2B-it-Q4_K_M.gguf"));
     if !path.exists() {
         return Err(format!("model not found at {}", path.display()).into());
     }

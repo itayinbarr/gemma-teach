@@ -19,7 +19,7 @@ struct Args {
     #[arg(long, env = "GEMMA_TEACH_ROOT")]
     root: Option<std::path::PathBuf>,
 
-    /// Backend to use. "llama" (default) loads Gemma 3n E2B locally; "mock" uses a
+    /// Backend to use. "llama" (default) loads Gemma 4 E2B locally; "mock" uses a
     /// scripted backend for development; "echo" is a chatty no-op.
     #[arg(long, env = "GEMMA_TEACH_BACKEND", default_value = "llama")]
     backend: String,

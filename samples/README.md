@@ -1,6 +1,6 @@
 # samples
 
-Reusable inputs for testing Gemma Teach end-to-end against real Gemma 3n.
+Reusable inputs for testing Gemma Teach end-to-end against real Gemma 4.
 
 ## chapters/
 

@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, Mutex, Semaphore};
 use crate::context::FlowCtx;
 use crate::step::{Flow, FlowError, StepKind, StepOutcome};
 
-/// Default concurrency cap for parallel-group steps. Conservative — Gemma 3n
+/// Default concurrency cap for parallel-group steps. Conservative — Gemma 4
 /// E2B on Metal uses the whole GPU per inference, so the win from concurrency
 /// is small and the memory cost is high. Power users can override.
 pub const DEFAULT_PARALLELISM: usize = 1;

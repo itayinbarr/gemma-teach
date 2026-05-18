@@ -27,7 +27,7 @@ async fn build_llama(model_path: Option<PathBuf>) -> Result<Arc<dyn LlmBackend>>
         Some(p) => p,
         None => {
             let dir = default_models_dir();
-            let candidate = dir.join("gemma-3n-E2B-it-Q4_K_M.gguf");
+            let candidate = dir.join("gemma-4-E2B-it-Q4_K_M.gguf");
             if !candidate.exists() {
                 download_default_model().await?;
             }
@@ -55,9 +55,9 @@ pub async fn download_default_model() -> Result<()> {
     use gt_core::model_fetch::{default_models_dir, fetch, FetchSpec};
     let dir = default_models_dir();
     tokio::fs::create_dir_all(&dir).await.ok();
-    let spec = FetchSpec::gemma_3n_e2b_q4km(&dir);
+    let spec = FetchSpec::gemma_4_e2b_q4km(&dir);
 
-    eprintln!("Downloading Gemma 3n E2B (Q4_K_M) — this is ~3.5 GB on first run.");
+    eprintln!("Downloading Gemma 4 E2B (Q4_K_M) — this is ~3.1 GB on first run.");
     eprintln!("Destination: {}", spec.dest.display());
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);

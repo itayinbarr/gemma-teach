@@ -1,5 +1,5 @@
 //! Real-model smoke test for `/student-add`. Gated on `GEMMA_TEACH_SMOKE=1`
-//! because it requires the ~3.5 GB GGUF on disk and Metal-capable hardware.
+//! because it requires the ~3.1 GB GGUF on disk and Metal-capable hardware.
 //! Skipped silently otherwise so CI stays fast.
 
 #![cfg(feature = "smoke")]
@@ -14,14 +14,14 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn student_add_against_real_gemma() {
+async fn student_add_against_real_gemma_4() {
     if std::env::var("GEMMA_TEACH_SMOKE").ok().as_deref() != Some("1") {
         eprintln!("skipping: set GEMMA_TEACH_SMOKE=1 to run this against the real model");
         return;
     }
     let model_path = std::env::var("GEMMA_TEACH_MODEL")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| default_models_dir().join("gemma-3n-E2B-it-Q4_K_M.gguf"));
+        .unwrap_or_else(|_| default_models_dir().join("gemma-4-E2B-it-Q4_K_M.gguf"));
     assert!(
         model_path.exists(),
         "set GEMMA_TEACH_MODEL or run `gemma-teach --download-only` first"

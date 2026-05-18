@@ -3,7 +3,7 @@
 ## Why this exists
 
 `tailor-notes-for-<slug>` and `tailor-hw-for-<slug>` are the two largest
-single-shot agent sessions in `/class-plan`. They ask Gemma 3n E2B to
+single-shot agent sessions in `/class-plan`. They ask Gemma 4 E2B to
 simultaneously:
 
 1. preserve the master's topic, structure, concept headings, and bullet
@@ -15,7 +15,7 @@ simultaneously:
 5. avoid both copying the master verbatim and swapping the topic.
 
 In trace recordings against the real model (`traces/phase-2-class-plan-*`),
-Gemma 3n collapses into one of two failure modes:
+Gemma 4 collapses into one of two failure modes:
 
 - **Verbatim copy** — output is byte-for-byte the master with whitespace
   edits. (Caught now by `validate-tailor-divergence-<slug>`.)

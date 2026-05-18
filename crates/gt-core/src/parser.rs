@@ -494,7 +494,7 @@ fn parse_gemma_tool_code(body: &str) -> Option<RawToolCall> {
     // Permissive fallback for the case where the model left the call
     // syntactically broken (e.g., unterminated `content="..."` because the
     // content itself contains backticks the model conflated with a fence
-    // close). Captured live from Gemma 3n traces; without this we drop the
+    // close). Captured live from real model traces; without this we drop the
     // whole call and the flow downstream tries to compile a non-existent
     // .md file.
     if let Some(call) = parse_python_call_lenient(trimmed) {
@@ -502,7 +502,7 @@ fn parse_gemma_tool_code(body: &str) -> Option<RawToolCall> {
     }
 
     // Shell-flag pattern: `Write -f path -e "content"`. Captured live from
-    // a Gemma 3n student-add trace where the model emitted Unix-style flags
+    // a student-add trace where the model emitted Unix-style flags
     // instead of Python kwargs. Without this rule, the prose fallback below
     // would lump the entire `-f X -e "..."` string into `path` and the Write
     // tool would error out for a missing `content`.
@@ -530,7 +530,7 @@ fn parse_gemma_tool_code(body: &str) -> Option<RawToolCall> {
 
 /// Recognize shell-flag tool calls: `Write -f path -e "content"` (and
 /// long-form `--path`, `--content`, alternative short flags `-p`, `-c`).
-/// This is a Gemma 3n quirk where the model emits a Unix CLI-style call
+/// This is a Gemma quirk where the model emits a Unix CLI-style call
 /// instead of the Python-style call shown in the system prompt examples.
 /// Returns None when the input doesn't *look* shell-style so the caller
 /// can fall through to other patterns.
@@ -1106,7 +1106,7 @@ pub fn repair_and_parse(raw: &str) -> (serde_json::Value, bool, bool) {
 
     // Normalize smart/curly quotes and a few common typographic variants to
     // their ASCII equivalents BEFORE any other pass. Captured live from
-    // Gemma 3n class-plan traces (v5+) where `Write(path=..., content="…")`
+    // class-plan traces (v5+) where `Write(path=..., content="…")`
     // and `–` em-dashes appear inside the content payload. Without this,
     // serde_json sees `"` and fails immediately.
     let fixed = normalize_typography(&current);
@@ -1449,7 +1449,7 @@ mod tests {
 
     // ---------- Gemma-quirk fixtures ----------
 
-    /// Captured from Gemma 3n E2B (trace 2026-05-15 student-add 001, extract-tags).
+    /// Captured from Gemma E2B (trace 2026-05-15 student-add 001, extract-tags).
     #[test]
     fn gemma_quirk_tool_code_prose_read() {
         let s = "```tool_code\nRead student.md\n```";
@@ -1479,7 +1479,7 @@ mod tests {
         assert_eq!(p.tool_calls[0].call.args["path"], "student.md");
     }
 
-    /// Captured from Gemma 3n E2B (trace 2026-05-15 student-add 001, write-student).
+    /// Captured from Gemma E2B (trace 2026-05-15 student-add 001, write-student).
     #[test]
     fn gemma_quirk_prose_write_then_fenced_body() {
         let s = "Write student.md\n```markdown\n# Maya\n\n## Snapshot\n- 12 years old\n```\nDone.";
@@ -1511,7 +1511,7 @@ mod tests {
         assert!(p.tool_calls.is_empty(), "got: {:?}", p);
     }
 
-    /// Captured from Gemma 3n E2B (trace 2026-05-15 class-plan v3, write-homework).
+    /// Captured from Gemma E2B (trace 2026-05-15 class-plan v3, write-homework).
     /// The content argument itself contained ``` which previously truncated
     /// the body and made the call unparseable.
     #[test]
@@ -1533,7 +1533,7 @@ mod tests {
         assert!(content.contains("```"), "trailing backticks preserved");
     }
 
-    /// Captured live from Gemma 3n E2B (class-plan v4): the model emits a
+    /// Captured live from Gemma E2B (class-plan v4): the model emits a
     /// `Write(..., content="...```...` call where the content string is
     /// UNTERMINATED — no closing `"` and no `)`. The string-aware close
     /// fails, plain close still picks up the trailing ``` , and the lenient
@@ -1568,7 +1568,7 @@ mod tests {
 
     // ---------- Phase 2 quirks ----------
 
-    /// Captured from Gemma 3n E2B trace
+    /// Captured from Gemma E2B trace
     /// `phase-2-student-add-elara-iter1.jsonl` (2026-05-16 write-student).
     /// The model emitted Unix-style flags inside a `tool_code` fence —
     /// `Write -f path -e "content"` — bypassing the Python kwargs syntax

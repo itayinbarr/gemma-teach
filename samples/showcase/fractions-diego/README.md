@@ -1,6 +1,6 @@
 # Showcase — fractions × Diego
 
-Captured end-to-end on an M-series Mac against the real Gemma 3n E2B Q4_K_M model. The files are numbered in the order the pipeline produces them so you can walk through the data transformation step by step.
+Captured end-to-end on an M-series Mac against the real Gemma 4 E2B Q4_K_M model. The files are numbered in the order the pipeline produces them so you can walk through the data transformation step by step.
 
 The showcase pairs a math chapter on fractions and ratios with a 6th-grade Barcelona-FC obsessed student. Math is the cleanest domain to demonstrate the system because mathematical operations have explicit operands; the per-student tailoring uses real numbers and named entities from the student's world as those operands, not as decorative settings.
 
